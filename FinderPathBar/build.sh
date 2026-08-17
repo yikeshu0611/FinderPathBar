@@ -72,10 +72,6 @@ cp "$ICON_PNG" "$APP_DIR/Contents/Resources/AppIcon.png" 2>/dev/null || true
 if [[ -f "$ROOT_DIR/Resources/DonateQR.png" ]]; then
   cp "$ROOT_DIR/Resources/DonateQR.png" "$APP_DIR/Contents/Resources/DonateQR.png"
 fi
-# Tip screenshot example (must show order / 转账单号 page).
-if [[ -f "$ROOT_DIR/Resources/example.png" ]]; then
-  cp "$ROOT_DIR/Resources/example.png" "$APP_DIR/Contents/Resources/example.png"
-fi
 
 codesign --force --deep --sign - --entitlements /dev/null "$APP_DIR" 2>/dev/null || codesign --force --deep --sign - "$APP_DIR"
 
