@@ -256,9 +256,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         updateHotKeyRegistrationForFrontmostApp()
         startAutoAttachFinder()
         startDonationReminderIfNeeded()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
-            self?.checkForAppUpdates(interactive: false)
-        }
+        scheduleMonthlyUpdateCheckIfNeeded()
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(activeApplicationChanged),
@@ -4778,7 +4776,10 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let checkUpdateButton = NSButton(title: localized("Check for Updates", "检查更新"), target: self, action: #selector(checkForAppUpdatesFromSettings))
         checkUpdateButton.bezelStyle = .rounded
-        let updateStatus = NSTextField(labelWithString: localized("Current version \(currentVersion)", "当前版本 \(currentVersion)"))
+        let updateStatus = NSTextField(labelWithString: localized(
+            "v\(currentVersion) · auto-check monthly",
+            "当前版本 \(currentVersion) · 每月自动检查"
+        ))
         updateStatus.font = .systemFont(ofSize: 11)
         updateStatus.textColor = .secondaryLabelColor
         updateStatus.translatesAutoresizingMaskIntoConstraints = false
@@ -5065,11 +5066,36 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     @objc private func checkForAppUpdatesFromSettings() {
-        checkForAppUpdates(interactive: true)
+        checkForAppUpdates(force: true, interactive: true)
     }
 
-    /// Check GitHub Releases; if a newer version exists, download the DMG and replace this app.
-    private func checkForAppUpdates(interactive: Bool) {
+    /// Periodic check: at most once per calendar month of runtime checks (~30 days).
+    private func scheduleMonthlyUpdateCheckIfNeeded() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            self?.checkForAppUpdates(force: false, interactive: false)
+        }
+    }
+
+    private var lastAppUpdateCheckAt: Date? {
+        get { defaults.object(forKey: "lastAppUpdateCheckAt") as? Date }
+        set {
+            if let newValue {
+                defaults.set(newValue, forKey: "lastAppUpdateCheckAt")
+            } else {
+                defaults.removeObject(forKey: "lastAppUpdateCheckAt")
+            }
+        }
+    }
+
+    private var monthlyUpdateCheckInterval: TimeInterval { 30 * 24 * 60 * 60 }
+
+    /// Check GitHub Releases. New version → ask before downloading/installing.
+    private func checkForAppUpdates(force: Bool, interactive: Bool) {
+        if !force, let last = lastAppUpdateCheckAt,
+           Date().timeIntervalSince(last) < monthlyUpdateCheckInterval {
+            AppLogger.shared.log("update check skipped: last=\(last)")
+            return
+        }
         if isCheckingForUpdates {
             if interactive {
                 setUpdateStatus(localized("Checking…", "正在检查…"))
@@ -5109,6 +5135,9 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
                     return
                 }
 
+                // Successful network check counts toward the monthly cadence.
+                self.lastAppUpdateCheckAt = Date()
+
                 guard let release = try? JSONDecoder().decode(GitHubReleaseInfo.self, from: data) else {
                     if interactive {
                         self.setUpdateStatus(self.localized("Check failed", "检查失败"))
@@ -5136,11 +5165,31 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
                     return
                 }
 
-                self.setUpdateStatus(self.localized("Updating to \(remoteVersion)…", "正在更新到 \(remoteVersion)…"))
-                self.showCloseFailure(self.localized("Found \(remoteVersion), downloading…", "发现新版本 \(remoteVersion)，正在下载更新…"))
-                self.downloadAndInstallUpdate(from: downloadURL, version: remoteVersion)
+                self.setUpdateStatus(self.localized("Update \(remoteVersion) available", "发现新版本 \(remoteVersion)"))
+                self.promptToInstallUpdate(version: remoteVersion, downloadURL: downloadURL)
             }
         }.resume()
+    }
+
+    private func promptToInstallUpdate(version: String, downloadURL: URL) {
+        let alert = NSAlert()
+        alert.messageText = localized("Update Available", "发现新版本")
+        alert.informativeText = localized(
+            "FinderPathBar \(version) is available. Update now?\nThe app will download the installer and restart.",
+            "FinderPathBar \(version) 可用，是否现在更新？\n确认后将下载安装包并重启应用。"
+        )
+        alert.addButton(withTitle: localized("Update", "更新"))
+        alert.addButton(withTitle: localized("Later", "以后"))
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else {
+            AppLogger.shared.log("update declined version=\(version)")
+            setUpdateStatus(localized("Update \(version) available", "有可用更新 \(version)"))
+            return
+        }
+        setUpdateStatus(localized("Updating to \(version)…", "正在更新到 \(version)…"))
+        showCloseFailure(localized("Downloading \(version)…", "正在下载 \(version)…"))
+        downloadAndInstallUpdate(from: downloadURL, version: version)
     }
 
     private func setUpdateStatus(_ text: String) {
