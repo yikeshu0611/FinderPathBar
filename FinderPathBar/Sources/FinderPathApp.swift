@@ -117,6 +117,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private var donationPanel: NSPanel?
     /// Wait until FinderPathBar panel is visible before first tip popup.
     private var donationAwaitingFPPanel = false
+    private var isCheckingForUpdates = false
+    private weak var settingsUpdateStatusLabel: NSTextField?
     private var hotKeyRefs: [EventHotKeyRef] = []
     private var isHotKeyHandlerInstalled = false
     private var mouseMonitor: Any?
@@ -254,6 +256,9 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         updateHotKeyRegistrationForFrontmostApp()
         startAutoAttachFinder()
         startDonationReminderIfNeeded()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            self?.checkForAppUpdates(interactive: false)
+        }
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(activeApplicationChanged),
@@ -4631,7 +4636,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
 
     private func makeSettingsPanel() -> NSPanel {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 360),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 400),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -4770,6 +4775,19 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         languagePopup.translatesAutoresizingMaskIntoConstraints = false
         languagePopup.widthAnchor.constraint(equalToConstant: 140).isActive = true
 
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let checkUpdateButton = NSButton(title: localized("Check for Updates", "检查更新"), target: self, action: #selector(checkForAppUpdatesFromSettings))
+        checkUpdateButton.bezelStyle = .rounded
+        let updateStatus = NSTextField(labelWithString: localized("Current version \(currentVersion)", "当前版本 \(currentVersion)"))
+        updateStatus.font = .systemFont(ofSize: 11)
+        updateStatus.textColor = .secondaryLabelColor
+        updateStatus.translatesAutoresizingMaskIntoConstraints = false
+        settingsUpdateStatusLabel = updateStatus
+        let updateRow = NSStackView(views: [checkUpdateButton, updateStatus])
+        updateRow.orientation = .horizontal
+        updateRow.spacing = 10
+        updateRow.alignment = .centerY
+
         let feedbackLabel = NSTextField(wrappingLabelWithString: localized("Please send \(AppLogger.shared.logURL.path) to zj391120@163.com", "请把 \(AppLogger.shared.logURL.path) 发送给 zj391120@163.com"))
         feedbackLabel.textColor = .secondaryLabelColor
         feedbackLabel.font = .systemFont(ofSize: 12)
@@ -4783,6 +4801,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             (localized("Colors", "背景颜色"), colorCombinedRow),
             (localized("New files", "新建类型"), newItemTypesBlock),
             (localized("Startup", "启动设置"), launchAtLoginCheckbox),
+            (localized("Updates", "软件更新"), updateRow),
             (localized("Feedback", "反馈信息"), feedbackLabel)
         ]
 
@@ -5043,6 +5062,206 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             self.autoAttachIfNeeded()
             self.updateHotKeyRegistrationForFrontmostApp()
         }
+    }
+
+    @objc private func checkForAppUpdatesFromSettings() {
+        checkForAppUpdates(interactive: true)
+    }
+
+    /// Check GitHub Releases; if a newer version exists, download the DMG and replace this app.
+    private func checkForAppUpdates(interactive: Bool) {
+        if isCheckingForUpdates {
+            if interactive {
+                setUpdateStatus(localized("Checking…", "正在检查…"))
+            }
+            return
+        }
+        isCheckingForUpdates = true
+        if interactive {
+            setUpdateStatus(localized("Checking for updates…", "正在检查更新…"))
+        }
+
+        let apiURL = URL(string: "https://api.github.com/repos/yikeshu0611/FinderPathBar/releases/latest")!
+        var request = URLRequest(url: apiURL, timeoutInterval: 20)
+        request.setValue("FinderPathBar-Updater", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                defer { self.isCheckingForUpdates = false }
+
+                if let error {
+                    AppLogger.shared.log("update check failed: \(error.localizedDescription)")
+                    if interactive {
+                        self.setUpdateStatus(self.localized("Check failed", "检查失败"))
+                        self.showCloseFailure(self.localized("Couldn't check for updates", "无法检查更新（请检查网络）"))
+                    }
+                    return
+                }
+                let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+                guard status == 200, let data else {
+                    AppLogger.shared.log("update check HTTP \(status)")
+                    if interactive {
+                        self.setUpdateStatus(self.localized("Check failed", "检查失败"))
+                        self.showCloseFailure(self.localized("Couldn't check for updates", "无法检查更新"))
+                    }
+                    return
+                }
+
+                guard let release = try? JSONDecoder().decode(GitHubReleaseInfo.self, from: data) else {
+                    if interactive {
+                        self.setUpdateStatus(self.localized("Check failed", "检查失败"))
+                    }
+                    return
+                }
+
+                let remoteVersion = release.tag_name.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+                let localVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+                AppLogger.shared.log("update check local=\(localVersion) remote=\(remoteVersion)")
+
+                guard self.compareVersion(remoteVersion, greaterThan: localVersion) else {
+                    if interactive {
+                        self.setUpdateStatus(self.localized("Up to date (\(localVersion))", "已是最新版本（\(localVersion)）"))
+                        self.showCloseFailure(self.localized("Already the latest version", "已是最新版本"))
+                    }
+                    return
+                }
+
+                guard let asset = release.assets.first(where: { $0.name.lowercased().hasSuffix(".dmg") }),
+                      let downloadURL = URL(string: asset.browser_download_url) else {
+                    if interactive {
+                        self.setUpdateStatus(self.localized("No DMG in release", "新版本没有 DMG"))
+                    }
+                    return
+                }
+
+                self.setUpdateStatus(self.localized("Updating to \(remoteVersion)…", "正在更新到 \(remoteVersion)…"))
+                self.showCloseFailure(self.localized("Found \(remoteVersion), downloading…", "发现新版本 \(remoteVersion)，正在下载更新…"))
+                self.downloadAndInstallUpdate(from: downloadURL, version: remoteVersion)
+            }
+        }.resume()
+    }
+
+    private func setUpdateStatus(_ text: String) {
+        settingsUpdateStatusLabel?.stringValue = text
+    }
+
+    private func compareVersion(_ lhs: String, greaterThan rhs: String) -> Bool {
+        let left = lhs.split(separator: ".").compactMap { Int($0) }
+        let right = rhs.split(separator: ".").compactMap { Int($0) }
+        let count = max(left.count, right.count)
+        for i in 0..<count {
+            let a = i < left.count ? left[i] : 0
+            let b = i < right.count ? right[i] : 0
+            if a != b { return a > b }
+        }
+        return false
+    }
+
+    private func downloadAndInstallUpdate(from url: URL, version: String) {
+        let tempDMG = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FinderPathBar-\(version)-\(UUID().uuidString).dmg")
+
+        let task = URLSession.shared.downloadTask(with: url) { [weak self] location, _, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error {
+                    AppLogger.shared.log("update download failed: \(error.localizedDescription)")
+                    self.setUpdateStatus(self.localized("Download failed", "下载失败"))
+                    self.showCloseFailure(self.localized("Update download failed", "更新下载失败"))
+                    return
+                }
+                guard let location else { return }
+                do {
+                    if FileManager.default.fileExists(atPath: tempDMG.path) {
+                        try FileManager.default.removeItem(at: tempDMG)
+                    }
+                    try FileManager.default.moveItem(at: location, to: tempDMG)
+                } catch {
+                    AppLogger.shared.log("update move failed: \(error.localizedDescription)")
+                    self.setUpdateStatus(self.localized("Download failed", "下载失败"))
+                    return
+                }
+                self.setUpdateStatus(self.localized("Installing \(version)…", "正在安装 \(version)…"))
+                self.installUpdate(fromDMG: tempDMG, version: version)
+            }
+        }
+        task.resume()
+    }
+
+    private func installUpdate(fromDMG dmgURL: URL, version: String) {
+        let destination = updateInstallDestinationURL()
+        let scriptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FinderPathBar-update-\(UUID().uuidString).sh")
+        let script = """
+        #!/bin/bash
+        set -euo pipefail
+        PID="\(ProcessInfo.processInfo.processIdentifier)"
+        DMG="\(dmgURL.path)"
+        DEST="\(destination.path)"
+        MOUNT_OUT="$(hdiutil attach -nobrowse -readonly "$DMG")"
+        MOUNT="$(echo "$MOUNT_OUT" | awk '/\\/Volumes\\//{print $NF; exit}')"
+        if [[ -z "$MOUNT" ]]; then
+          echo "mount failed" >&2
+          exit 1
+        fi
+        APP="$(find "$MOUNT" -maxdepth 2 -name "*.app" -type d | head -n 1)"
+        if [[ -z "$APP" ]]; then
+          hdiutil detach "$MOUNT" -quiet || true
+          echo "app not found" >&2
+          exit 1
+        fi
+        while kill -0 "$PID" 2>/dev/null; do sleep 0.3; done
+        sleep 0.8
+        mkdir -p "$(dirname "$DEST")"
+        rm -rf "$DEST"
+        ditto "$APP" "$DEST"
+        xattr -cr "$DEST" >/dev/null 2>&1 || true
+        hdiutil detach "$MOUNT" -quiet || true
+        rm -f "$DMG"
+        open "$DEST"
+        """
+        do {
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        } catch {
+            AppLogger.shared.log("update script write failed: \(error.localizedDescription)")
+            showCloseFailure(localized("Couldn't prepare installer", "无法准备安装脚本"))
+            return
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [scriptURL.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            AppLogger.shared.log("update script launch failed: \(error.localizedDescription)")
+            showCloseFailure(localized("Couldn't start installer", "无法启动安装"))
+            return
+        }
+
+        AppLogger.shared.log("update installing version=\(version) dest=\(destination.path)")
+        settingsPanel?.orderOut(nil)
+        showCloseFailure(localized("Installing update, app will restart…", "正在安装更新，应用即将重启…"))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func updateInstallDestinationURL() -> URL {
+        let current = Bundle.main.bundleURL.standardizedFileURL
+        let parent = current.deletingLastPathComponent()
+        if current.path.hasPrefix("/Applications/") {
+            return current
+        }
+        if FileManager.default.isWritableFile(atPath: parent.path) {
+            return current
+        }
+        return URL(fileURLWithPath: "/Applications/FinderPathBar.app")
     }
 
     private func makeHistoryPanel() -> NSPanel {
@@ -6717,6 +6936,16 @@ private struct FinderBounds {
 private struct HistoryEntry {
     let path: String
     let openedAt: Date
+}
+
+private struct GitHubReleaseInfo: Decodable {
+    let tag_name: String
+    let assets: [GitHubReleaseAsset]
+}
+
+private struct GitHubReleaseAsset: Decodable {
+    let name: String
+    let browser_download_url: String
 }
 
 private struct Bookmark: Codable, Equatable {

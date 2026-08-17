@@ -2,11 +2,11 @@
 
 面向习惯 Windows「资源管理器地址栏」的 macOS 用户：在 Finder 窗口上方贴一条轻量地址栏，显示当前路径，并提供新建、重命名、剪切移动、收藏夹等快捷操作。
 
-**当前版本：1.0.71**
+**当前版本：1.0.72**
 
 ## 下载
 
-请到本仓库 **[Releases](https://github.com/yikeshu0611/FinderPathBar/releases)** 页面，在 **Assets** 中下载最新 `.dmg`（例如 `FinderPathBar-1.0.71.dmg`）。
+请到本仓库 **[Releases](https://github.com/yikeshu0611/FinderPathBar/releases)** 页面，在 **Assets** 中下载最新 `.dmg`（例如 `FinderPathBar-1.0.72.dmg`）。
 
 ## 安装与权限
 
