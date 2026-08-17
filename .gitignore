@@ -12,12 +12,19 @@ FinderPathBar/build/
 *.swp
 *~
 
-# Do not commit credentials
+# Secrets — never commit
 .env
 *.pem
 *.p12
 credentials*
 token*
+github账号信息.txt
+*账号信息*
+
+# Local scratch / reference (not part of the public app)
+参考代码/
+example.png
+dist/未命名文件夹/
 
 # Keep release DMGs out of git history (upload via GitHub Releases)
 dist/*.dmg
