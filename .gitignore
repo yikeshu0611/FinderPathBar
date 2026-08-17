@@ -1,0 +1,24 @@
+# Build / packaging intermediates
+FinderPathBar/build/
+**/*.app/
+*.incomplete
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Local / editor
+.cursor/
+*.swp
+*~
+
+# Do not commit credentials
+.env
+*.pem
+*.p12
+credentials*
+token*
+
+# Keep release DMGs out of git history (upload via GitHub Releases)
+dist/*.dmg
+!dist/.gitkeep

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleExecutable</key>
+	<string>FinderPathBar</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.zhangjing.FinderPathBar</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>FinderPathBar</string>
+	<key>CFBundleDisplayName</key>
+	<string>FinderPathBar</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.70</string>
+	<key>CFBundleVersion</key>
+	<string>71</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>FinderPathBar 需要读取当前 Finder 窗口路径，以便把它显示在地址栏中。</string>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>FinderPathBar 需要辅助功能权限，以便贴近 Finder 窗口显示地址栏并执行关闭、重命名等操作。</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 ZhangJIng. All rights reserved.</string>
+</dict>
+</plist>
