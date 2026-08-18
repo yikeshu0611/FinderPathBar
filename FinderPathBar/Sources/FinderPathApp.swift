@@ -663,7 +663,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         bookmarksToolbarLeadingToContentConstraint.isActive = onThirdRow
         bookmarksToolbarLeadingToOpsConstraint.isActive = !onThirdRow
         bookmarksToolbarCenterYToOpsConstraint.isActive = !onThirdRow
-        bookmarkRowSeparator?.isHidden = true
+        // Same row as Ext: gray divider after Ext, before bookmarks.
+        bookmarkRowSeparator?.isHidden = onThirdRow
 
         stackCenterYConstraint.constant = pathRowCenterYFromBottom
         historyCenterYConstraint.constant = pathRowCenterYFromBottom
