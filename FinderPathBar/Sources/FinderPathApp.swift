@@ -122,6 +122,11 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private var donationAwaitingFPPanel = false
     private var isCheckingForUpdates = false
     private weak var settingsUpdateStatusLabel: NSTextField?
+    private weak var settingsUpdateProgress: NSProgressIndicator?
+    private var updateProgressPanel: NSPanel?
+    private var updateProgressIndicator: NSProgressIndicator?
+    private var updateProgressLabel: NSTextField?
+    private var updateDownloader: UpdateDownloadController?
     private var hotKeyRefs: [EventHotKeyRef] = []
     private var isHotKeyHandlerInstalled = false
     private var mouseMonitor: Any?
@@ -391,8 +396,9 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         closeButton.toolTip = "Close Finder Window (Cmd+W)"
         closeOthersButton.toolTip = localized("Close other Finder windows", "关闭其他 Finder 窗口")
         closeAllButton.toolTip = localized("Close all Finder windows", "关闭所有 Finder 窗口")
-        applyCloseComboTitle(closeOthersButton, suffix: "o")
-        applyCloseComboTitle(closeAllButton, suffix: "a")
+        applyCloseGlyph(closeButton, suffix: nil)
+        applyCloseGlyph(closeOthersButton, suffix: "o")
+        applyCloseGlyph(closeAllButton, suffix: "a")
         settingsButton.toolTip = "Settings"
         backButton.toolTip = "Back (Cmd+←)"
         forwardButton.toolTip = "Forward (Cmd+→)"
@@ -1025,11 +1031,13 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         button.sendAction(on: [.leftMouseUp])
     }
 
-    /// Same "x" as the first close button; o/a sit on x's bottom edge, slightly to the right.
-    private func applyCloseComboTitle(_ button: NSButton, suffix: String) {
+    /// Draw the shared close "x" (same size/baseline on x, Xo, Xa). Optional o/a sits
+    /// on the x ink's bottom edge, slightly to the right.
+    private func applyCloseGlyph(_ button: NSButton, suffix: String?) {
         let xFont = NSFont.systemFont(ofSize: iconSize, weight: .semibold)
         let suffixSize = max(7, iconSize * 0.62)
         let suffixFont = NSFont.systemFont(ofSize: suffixSize, weight: .medium)
+        let canvasHeight = max(iconHeight, 16)
 
         func lineAndImageBounds(_ string: String, font: NSFont) -> (CTLine, CGRect) {
             let attr = NSAttributedString(string: string, attributes: [
@@ -1041,33 +1049,38 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         }
 
         let (xLine, xBounds) = lineAndImageBounds("x", font: xFont)
-        let (suffixLine, suffixBounds) = lineAndImageBounds(suffix, font: suffixFont)
+        let suffixLineAndBounds: (CTLine, CGRect)? = suffix.map { lineAndImageBounds($0, font: suffixFont) }
         let padding: CGFloat = 1
         let gap: CGFloat = 3.4
-        let xBaseline = CGPoint(x: padding - xBounds.minX, y: padding - xBounds.minY)
-        let suffixBaseline = CGPoint(
-            x: xBaseline.x + xBounds.maxX + gap - suffixBounds.minX,
-            y: xBaseline.y + xBounds.minY - suffixBounds.minY
+        // Pin x to the same vertical slot in every button so the three x glyphs match.
+        let xBaseline = CGPoint(
+            x: padding - xBounds.minX,
+            y: (canvasHeight - xBounds.height) / 2 - xBounds.minY
         )
-        let maxX = max(xBaseline.x + xBounds.maxX, suffixBaseline.x + suffixBounds.maxX)
-        let maxY = max(xBaseline.y + xBounds.maxY, suffixBaseline.y + suffixBounds.maxY)
-        let canvas = NSSize(
-            width: ceil(maxX + padding),
-            height: ceil(max(iconHeight, maxY + padding))
-        )
-        let yLift = max(0, (canvas.height - maxY - padding) / 2)
+        var maxX = xBaseline.x + xBounds.maxX
+        var suffixBaseline = CGPoint.zero
+        if let (_, suffixBounds) = suffixLineAndBounds {
+            suffixBaseline = CGPoint(
+                x: xBaseline.x + xBounds.maxX + gap - suffixBounds.minX,
+                y: xBaseline.y + xBounds.minY - suffixBounds.minY
+            )
+            maxX = max(maxX, suffixBaseline.x + suffixBounds.maxX)
+        }
+        let canvas = NSSize(width: ceil(maxX + padding), height: canvasHeight)
         let image = NSImage(size: canvas, flipped: false) { _ in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
             ctx.saveGState()
             ctx.textMatrix = .identity
-            ctx.translateBy(x: xBaseline.x, y: xBaseline.y + yLift)
+            ctx.translateBy(x: xBaseline.x, y: xBaseline.y)
             CTLineDraw(xLine, ctx)
             ctx.restoreGState()
-            ctx.saveGState()
-            ctx.textMatrix = .identity
-            ctx.translateBy(x: suffixBaseline.x, y: suffixBaseline.y + yLift)
-            CTLineDraw(suffixLine, ctx)
-            ctx.restoreGState()
+            if let (suffixLine, _) = suffixLineAndBounds {
+                ctx.saveGState()
+                ctx.textMatrix = .identity
+                ctx.translateBy(x: suffixBaseline.x, y: suffixBaseline.y)
+                CTLineDraw(suffixLine, ctx)
+                ctx.restoreGState()
+            }
             return true
         }
         image.isTemplate = true
@@ -4887,10 +4900,12 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         historyBackgroundView?.layer?.backgroundColor = NSColor(hex: dropdownBackgroundColorHex).cgColor
         pathField.font = .monospacedSystemFont(ofSize: pathFontSize, weight: .regular)
         for button in iconButtons {
-            if button === closeOthersButton {
-                applyCloseComboTitle(button, suffix: "o")
+            if button === closeButton {
+                applyCloseGlyph(button, suffix: nil)
+            } else if button === closeOthersButton {
+                applyCloseGlyph(button, suffix: "o")
             } else if button === closeAllButton {
-                applyCloseComboTitle(button, suffix: "a")
+                applyCloseGlyph(button, suffix: "a")
             } else {
                 button.font = .systemFont(ofSize: iconSize, weight: .semibold)
             }
@@ -5073,10 +5088,25 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         updateStatus.textColor = .secondaryLabelColor
         updateStatus.translatesAutoresizingMaskIntoConstraints = false
         settingsUpdateStatusLabel = updateStatus
+        let progress = NSProgressIndicator()
+        progress.style = .bar
+        progress.isIndeterminate = false
+        progress.minValue = 0
+        progress.maxValue = 1
+        progress.doubleValue = 0
+        progress.isHidden = true
+        progress.translatesAutoresizingMaskIntoConstraints = false
+        progress.widthAnchor.constraint(equalToConstant: 240).isActive = true
+        progress.heightAnchor.constraint(equalToConstant: 12).isActive = true
+        settingsUpdateProgress = progress
         let updateRow = NSStackView(views: [checkUpdateButton, updateStatus])
         updateRow.orientation = .horizontal
         updateRow.spacing = 10
         updateRow.alignment = .centerY
+        let updateBlock = NSStackView(views: [updateRow, progress])
+        updateBlock.orientation = .vertical
+        updateBlock.spacing = 6
+        updateBlock.alignment = .leading
 
         let feedbackLabel = NSTextField(wrappingLabelWithString: localized("Please send \(AppLogger.shared.logURL.path) to zj391120@163.com", "请把 \(AppLogger.shared.logURL.path) 发送给 zj391120@163.com"))
         feedbackLabel.textColor = .secondaryLabelColor
@@ -5091,7 +5121,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             (localized("Colors", "背景颜色"), colorCombinedRow),
             (localized("New files", "新建类型"), newItemTypesBlock),
             (localized("Startup", "启动设置"), launchAtLoginCheckbox),
-            (localized("Updates", "软件更新"), updateRow),
+            (localized("Updates", "软件更新"), updateBlock),
             (localized("Feedback", "反馈信息"), feedbackLabel)
         ]
 
@@ -5477,12 +5507,114 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             return
         }
         setUpdateStatus(localized("Updating to \(version)…", "正在更新到 \(version)…"))
-        showCloseFailure(localized("Downloading \(version)…", "正在下载 \(version)…"))
+        showUpdateDownloadProgress(version: version, fraction: 0, received: 0, total: 0)
         downloadAndInstallUpdate(from: downloadURL, version: version)
     }
 
     private func setUpdateStatus(_ text: String) {
         settingsUpdateStatusLabel?.stringValue = text
+    }
+
+    private func showUpdateDownloadProgress(version: String, fraction: Double, received: Int64, total: Int64) {
+        let percent = Int((fraction * 100).rounded())
+        let label: String
+        if total > 0 {
+            label = localized(
+                "Downloading \(version)… \(percent)% (\(byteCountString(received)) / \(byteCountString(total)))",
+                "正在下载 \(version)… \(percent)%（\(byteCountString(received)) / \(byteCountString(total))）"
+            )
+        } else {
+            label = localized("Downloading \(version)…", "正在下载 \(version)…")
+        }
+        setUpdateStatus(label)
+        let applyBar: (NSProgressIndicator?) -> Void = { bar in
+            guard let bar else { return }
+            bar.isHidden = false
+            if total > 0 {
+                bar.isIndeterminate = false
+                bar.stopAnimation(nil)
+                bar.doubleValue = fraction
+            } else {
+                bar.isIndeterminate = true
+                bar.startAnimation(nil)
+            }
+        }
+        applyBar(settingsUpdateProgress)
+        ensureUpdateProgressPanel()
+        updateProgressLabel?.stringValue = label
+        applyBar(updateProgressIndicator)
+        if let panel = updateProgressPanel {
+            positionUpdateProgressPanel(panel)
+            panel.orderFrontRegardless()
+        }
+    }
+
+    private func hideUpdateDownloadProgress() {
+        settingsUpdateProgress?.stopAnimation(nil)
+        settingsUpdateProgress?.isHidden = true
+        settingsUpdateProgress?.doubleValue = 0
+        updateProgressIndicator?.stopAnimation(nil)
+        updateProgressPanel?.orderOut(nil)
+    }
+
+    private func ensureUpdateProgressPanel() {
+        if updateProgressPanel != nil { return }
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 64),
+            styleMask: [.titled, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = localized("Software Update", "软件更新")
+        panel.isFloatingPanel = true
+        panel.level = .modalPanel
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 12)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        updateProgressLabel = label
+
+        let bar = NSProgressIndicator()
+        bar.style = .bar
+        bar.isIndeterminate = false
+        bar.minValue = 0
+        bar.maxValue = 1
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        updateProgressIndicator = bar
+
+        guard let content = panel.contentView else { return }
+        content.addSubview(label)
+        content.addSubview(bar)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
+            label.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            label.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            bar.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 8),
+            bar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            bar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            bar.heightAnchor.constraint(equalToConstant: 12)
+        ])
+        updateProgressPanel = panel
+    }
+
+    private func positionUpdateProgressPanel(_ progressPanel: NSPanel) {
+        if let settingsPanel, settingsPanel.isVisible {
+            let frame = settingsPanel.frame
+            progressPanel.setFrameOrigin(NSPoint(x: frame.midX - 180, y: frame.minY - 76))
+            return
+        }
+        if panel.isVisible {
+            let frame = panel.frame
+            progressPanel.setFrameOrigin(NSPoint(x: frame.midX - 180, y: frame.minY - 76))
+            return
+        }
+        progressPanel.center()
+    }
+
+    private func byteCountString(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     private func compareVersion(_ lhs: String, greaterThan rhs: String) -> Bool {
@@ -5498,19 +5630,25 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private func downloadAndInstallUpdate(from url: URL, version: String) {
-        let tempDMG = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FinderPathBar-\(version)-\(UUID().uuidString).dmg")
-
-        let task = URLSession.shared.downloadTask(with: url) { [weak self] location, _, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if let error {
-                    AppLogger.shared.log("update download failed: \(error.localizedDescription)")
-                    self.setUpdateStatus(self.localized("Download failed", "下载失败"))
-                    self.showCloseFailure(self.localized("Update download failed", "更新下载失败"))
-                    return
-                }
-                guard let location else { return }
+        let downloader = UpdateDownloadController()
+        updateDownloader = downloader
+        downloader.onProgress = { [weak self] received, total in
+            guard let self else { return }
+            let fraction = total > 0 ? min(1, Double(received) / Double(total)) : 0
+            self.showUpdateDownloadProgress(version: version, fraction: fraction, received: received, total: total)
+        }
+        downloader.onFinish = { [weak self] result in
+            guard let self else { return }
+            self.updateDownloader = nil
+            switch result {
+            case .failure(let error):
+                AppLogger.shared.log("update download failed: \(error.localizedDescription)")
+                self.hideUpdateDownloadProgress()
+                self.setUpdateStatus(self.localized("Download failed", "下载失败"))
+                self.showCloseFailure(self.localized("Update download failed", "更新下载失败"))
+            case .success(let location):
+                let tempDMG = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("FinderPathBar-\(version)-\(UUID().uuidString).dmg")
                 do {
                     if FileManager.default.fileExists(atPath: tempDMG.path) {
                         try FileManager.default.removeItem(at: tempDMG)
@@ -5518,14 +5656,17 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
                     try FileManager.default.moveItem(at: location, to: tempDMG)
                 } catch {
                     AppLogger.shared.log("update move failed: \(error.localizedDescription)")
+                    self.hideUpdateDownloadProgress()
                     self.setUpdateStatus(self.localized("Download failed", "下载失败"))
                     return
                 }
+                self.showUpdateDownloadProgress(version: version, fraction: 1, received: 1, total: 1)
                 self.setUpdateStatus(self.localized("Installing \(version)…", "正在安装 \(version)…"))
+                self.updateProgressLabel?.stringValue = self.localized("Installing \(version)…", "正在安装 \(version)…")
                 self.installUpdate(fromDMG: tempDMG, version: version)
             }
         }
-        task.resume()
+        downloader.start(url: url)
     }
 
     private func installUpdate(fromDMG dmgURL: URL, version: String) {
@@ -8253,6 +8394,75 @@ private final class AppLogger {
         let oldURL = currentLogURL.deletingPathExtension().appendingPathExtension("old.txt")
         try? FileManager.default.removeItem(at: oldURL)
         try? FileManager.default.moveItem(at: currentLogURL, to: oldURL)
+    }
+}
+
+private final class UpdateDownloadController: NSObject, URLSessionDownloadDelegate {
+    var onProgress: ((Int64, Int64) -> Void)?
+    var onFinish: ((Result<URL, Error>) -> Void)?
+    private var session: URLSession?
+    private var copiedURL: URL?
+    private var delivered = false
+
+    func start(url: URL) {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 600
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
+        self.session = session
+        session.downloadTask(with: url).resume()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        onProgress?(totalBytesWritten, totalBytesExpectedToWrite)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FinderPathBar-download-\(UUID().uuidString).dmg")
+        do {
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.copyItem(at: location, to: dest)
+            copiedURL = dest
+        } catch {
+            deliver(.failure(error))
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            deliver(.failure(error))
+            return
+        }
+        if let copiedURL {
+            deliver(.success(copiedURL))
+        } else {
+            deliver(.failure(NSError(
+                domain: "FinderPathBar",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Update download did not produce a file"]
+            )))
+        }
+    }
+
+    private func deliver(_ result: Result<URL, Error>) {
+        guard !delivered else { return }
+        delivered = true
+        onFinish?(result)
+        session?.finishTasksAndInvalidate()
+        session = nil
     }
 }
 
