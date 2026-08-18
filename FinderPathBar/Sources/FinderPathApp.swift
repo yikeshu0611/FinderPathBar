@@ -376,6 +376,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         pathField.isHidden = false
 
         let closeButton = makeIconButton(title: "x") { [weak self] in self?.closeFinderAndHide() }
+        let closeOthersButton = makeIconButton(title: "Xo") { [weak self] in self?.closeOtherFinderWindows() }
+        let closeAllButton = makeIconButton(title: "Xa") { [weak self] in self?.closeAllFinderWindows() }
         let settingsButton = makeIconButton(title: "⚙") { [weak self] in self?.showSettings() }
         let backButton = makeIconButton(title: "<") { [weak self] in self?.goBack() }
         let forwardButton = makeIconButton(title: ">") { [weak self] in self?.goForward() }
@@ -384,6 +386,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         let bookmarkButton = makeIconButton(title: "") { [weak self] in self?.toggleBookmark() }
         configureIconButton(historyButton)
         closeButton.toolTip = "Close Finder Window (Cmd+W)"
+        closeOthersButton.toolTip = localized("Close other Finder windows", "关闭其他 Finder 窗口")
+        closeAllButton.toolTip = localized("Close all Finder windows", "关闭所有 Finder 窗口")
         settingsButton.toolTip = "Settings"
         backButton.toolTip = "Back (Cmd+←)"
         forwardButton.toolTip = "Forward (Cmd+→)"
@@ -429,9 +433,9 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         buttonHandlers[historyButton] = { [weak self] in
             self?.toggleHistoryMenu()
         }
-        iconButtons = [closeButton, settingsButton, backButton, forwardButton, parentButton, historyButton, bookmarkButton, searchButton]
+        iconButtons = [closeButton, closeOthersButton, closeAllButton, settingsButton, backButton, forwardButton, parentButton, historyButton, bookmarkButton, searchButton]
 
-        let buttonStack = NSStackView(views: [closeButton, settingsButton, backButton, forwardButton, parentButton])
+        let buttonStack = NSStackView(views: [closeButton, closeOthersButton, closeAllButton, settingsButton, backButton, forwardButton, parentButton])
         buttonStack.orientation = .horizontal
         buttonStack.spacing = 3
         buttonStack.alignment = .centerY
@@ -554,6 +558,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         searchFieldWidthConstraint = searchField.widthAnchor.constraint(equalToConstant: 0)
         iconButtonHeightConstraints = [
             closeButton.heightAnchor.constraint(equalToConstant: iconHeight),
+            closeOthersButton.heightAnchor.constraint(equalToConstant: iconHeight),
+            closeAllButton.heightAnchor.constraint(equalToConstant: iconHeight),
             settingsButton.heightAnchor.constraint(equalToConstant: iconHeight),
             backButton.heightAnchor.constraint(equalToConstant: iconHeight),
             forwardButton.heightAnchor.constraint(equalToConstant: iconHeight),
@@ -580,6 +586,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             stackCenterYConstraint,
 
             closeButton.widthAnchor.constraint(equalToConstant: 22),
+            closeOthersButton.widthAnchor.constraint(equalToConstant: 26),
+            closeAllButton.widthAnchor.constraint(equalToConstant: 26),
             settingsButton.widthAnchor.constraint(equalToConstant: 22),
             backButton.widthAnchor.constraint(equalToConstant: 22),
             forwardButton.widthAnchor.constraint(equalToConstant: 22),
@@ -2856,6 +2864,76 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         }
     }
 
+    @objc private func closeOtherFinderWindows() {
+        AppLogger.shared.log("closeOtherFinderWindows")
+        guard ensureAccessibilityPermission(prompt: true) else {
+            NSSound.beep()
+            showCloseFailure(localized("Accessibility permission is not enabled", "辅助功能权限未生效"))
+            return
+        }
+        suppressAutoHide(duration: 1.5)
+        let script = """
+        tell application "Finder"
+            if (count of Finder windows) is 0 then return "none"
+            if (count of Finder windows) is 1 then return "only"
+            set keepID to id of Finder window 1
+            close (every Finder window whose id is not keepID)
+            return "ok"
+        end tell
+        """
+        guard let result = runFinderScript(script)?.stringValue else {
+            NSSound.beep()
+            showCloseFailure(localized("Couldn't close other windows", "无法关闭其他窗口"))
+            return
+        }
+        if result == "none" || result == "only" {
+            showCloseFailure(localized("No other Finder windows", "没有其他 Finder 窗口"))
+            return
+        }
+        AppLogger.shared.log("closeOtherFinderWindows ok")
+        showCloseFailure(localized("Closed other windows", "已关闭其他窗口"))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            self?.refreshPathFromFinder()
+            self?.updatePanelFrame(lightweight: true)
+        }
+    }
+
+    @objc private func closeAllFinderWindows() {
+        AppLogger.shared.log("closeAllFinderWindows")
+        guard ensureAccessibilityPermission(prompt: true) else {
+            NSSound.beep()
+            showCloseFailure(localized("Accessibility permission is not enabled", "辅助功能权限未生效"))
+            return
+        }
+        suppressAutoAttachUntil = Date().addingTimeInterval(0.35)
+        let script = """
+        tell application "Finder"
+            if (count of Finder windows) is 0 then return "none"
+            close every Finder window
+            return "ok"
+        end tell
+        """
+        guard let result = runFinderScript(script)?.stringValue else {
+            NSSound.beep()
+            showCloseFailure(localized("Couldn't close Finder windows", "无法关闭 Finder 窗口"))
+            suppressAutoAttachUntil = nil
+            return
+        }
+        attachedFinderWindowID = nil
+        lastFinderWindowBounds = nil
+        lastMainContentBounds = nil
+        hidePanelAutomatically(force: true)
+        if result == "none" {
+            showCloseFailure(localized("No Finder windows", "没有 Finder 窗口"))
+        } else {
+            AppLogger.shared.log("closeAllFinderWindows ok")
+            showCloseFailure(localized("Closed all Finder windows", "已关闭全部窗口"))
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.suppressAutoAttachUntil = nil
+        }
+    }
+
     @objc private func goToParentDirectory() {
         // A navigation may temporarily run the main event loop while Finder
         // processes its Apple event. Ignore repeated clicks until that
@@ -4600,7 +4678,12 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private var buttonStackWidthEstimate: CGFloat {
-        CGFloat(max(1, iconButtons.count - 1)) * 22 + CGFloat(max(0, iconButtons.count - 2)) * 3 + 15
+        // Row 1 stack: x + Xo + Xa + ⚙ < > ^
+        let closeWidth: CGFloat = 22
+        let extraCloseWidth: CGFloat = 26
+        let navWidth: CGFloat = 22
+        let spacing: CGFloat = 3
+        return closeWidth + extraCloseWidth * 2 + navWidth * 4 + spacing * 6 + 15
     }
 
     private func showHistoryPanelBelowAddressBar() {
