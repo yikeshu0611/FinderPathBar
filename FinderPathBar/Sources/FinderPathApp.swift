@@ -53,6 +53,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private var cachedFinderPath: String?
     private var backgroundView: NSView!
     private var closeButton: NSButton!
+    private var closeOthersButton: NSButton!
+    private var closeAllButton: NSButton!
     private var backButton: NSButton!
     private var forwardButton: NSButton!
     private var parentButton: NSButton!
@@ -388,6 +390,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         closeButton.toolTip = "Close Finder Window (Cmd+W)"
         closeOthersButton.toolTip = localized("Close other Finder windows", "关闭其他 Finder 窗口")
         closeAllButton.toolTip = localized("Close all Finder windows", "关闭所有 Finder 窗口")
+        applyCloseComboTitle(closeOthersButton, suffix: "o")
+        applyCloseComboTitle(closeAllButton, suffix: "a")
         settingsButton.toolTip = "Settings"
         backButton.toolTip = "Back (Cmd+←)"
         forwardButton.toolTip = "Forward (Cmd+→)"
@@ -395,6 +399,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         historyButton.toolTip = "History (Cmd+↓)"
         bookmarkButton.toolTip = localized("Add bookmark", "收藏当前地址")
         self.closeButton = closeButton
+        self.closeOthersButton = closeOthersButton
+        self.closeAllButton = closeAllButton
         self.backButton = backButton
         self.forwardButton = forwardButton
         self.parentButton = parentButton
@@ -1016,6 +1022,21 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         button.contentTintColor = .labelColor
         button.translatesAutoresizingMaskIntoConstraints = false
         button.sendAction(on: [.leftMouseUp])
+    }
+
+    /// Match the first-row close "x", then append o/a at the same size.
+    private func applyCloseComboTitle(_ button: NSButton, suffix: String) {
+        let xFont = NSFont.systemFont(ofSize: iconSize, weight: .semibold)
+        let title = NSMutableAttributedString()
+        title.append(NSAttributedString(string: "x", attributes: [
+            .font: xFont,
+            .foregroundColor: NSColor.labelColor
+        ]))
+        title.append(NSAttributedString(string: suffix, attributes: [
+            .font: xFont,
+            .foregroundColor: NSColor.labelColor
+        ]))
+        button.attributedTitle = title
     }
 
     private func showToolbarMenu(from sourceButton: NSButton, items: [ToolbarMenuItem]) {
@@ -2865,37 +2886,96 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     @objc private func closeOtherFinderWindows() {
-        AppLogger.shared.log("closeOtherFinderWindows")
-        guard ensureAccessibilityPermission(prompt: true) else {
+        closeOtherFinderWindows(attempt: 0)
+    }
+
+    private func closeOtherFinderWindows(attempt: Int) {
+        AppLogger.shared.log("closeOtherFinderWindows attempt=\(attempt)")
+        guard ensureAccessibilityPermission(prompt: attempt == 0) else {
             NSSound.beep()
             showCloseFailure(localized("Accessibility permission is not enabled", "辅助功能权限未生效"))
             return
         }
         suppressAutoHide(duration: 1.5)
+        if isExecutingAppleScript, attempt < 12 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.closeOtherFinderWindows(attempt: attempt + 1)
+            }
+            return
+        }
+        // Close from the back so window 1 (current/front) stays. Using
+        // `whose id is not …` fails on many Finder versions and looks like a no-op.
         let script = """
         tell application "Finder"
-            if (count of Finder windows) is 0 then return "none"
-            if (count of Finder windows) is 1 then return "only"
-            set keepID to id of Finder window 1
-            close (every Finder window whose id is not keepID)
+            set windowCount to (count of Finder windows)
+            if windowCount is 0 then return "none"
+            if windowCount is 1 then return "only"
+            repeat while (count of Finder windows) > 1
+                close Finder window (count of Finder windows)
+            end repeat
             return "ok"
         end tell
         """
-        guard let result = runFinderScript(script)?.stringValue else {
-            NSSound.beep()
-            showCloseFailure(localized("Couldn't close other windows", "无法关闭其他窗口"))
+        let result = runFinderScript(script)?.stringValue
+        AppLogger.shared.log("closeOtherFinderWindows scriptResult=\(result ?? "nil")")
+        if result == "ok" {
+            showCloseFailure(localized("Closed other windows", "已关闭其他窗口"))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                self?.refreshPathFromFinder()
+                self?.updatePanelFrame(lightweight: true)
+            }
             return
         }
         if result == "none" || result == "only" {
+            let axClosed = closeOtherFinderWindowsWithAccessibility()
+            if axClosed > 0 {
+                showCloseFailure(localized("Closed other windows", "已关闭其他窗口"))
+                return
+            }
             showCloseFailure(localized("No other Finder windows", "没有其他 Finder 窗口"))
             return
         }
-        AppLogger.shared.log("closeOtherFinderWindows ok")
-        showCloseFailure(localized("Closed other windows", "已关闭其他窗口"))
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-            self?.refreshPathFromFinder()
-            self?.updatePanelFrame(lightweight: true)
+        let axClosed = closeOtherFinderWindowsWithAccessibility()
+        if axClosed > 0 {
+            AppLogger.shared.log("closeOtherFinderWindows axClosed=\(axClosed)")
+            showCloseFailure(localized("Closed other windows", "已关闭其他窗口"))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                self?.refreshPathFromFinder()
+                self?.updatePanelFrame(lightweight: true)
+            }
+            return
         }
+        NSSound.beep()
+        showCloseFailure(localized("Couldn't close other windows", "无法关闭其他窗口"))
+    }
+
+    private func closeOtherFinderWindowsWithAccessibility() -> Int {
+        guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first else {
+            return 0
+        }
+        let appElement = AXUIElementCreateApplication(finder.processIdentifier)
+        var windowsValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+              let windows = windowsValue as? [AXUIElement] else {
+            return 0
+        }
+        let keepWindow = attachedFinderWindowElement(for: finder) ?? frontFinderWindowElement(for: finder)
+        let keepNumber = keepWindow.flatMap { axWindowNumber($0) }
+        var closed = 0
+        for window in windows {
+            if let keepNumber, axWindowNumber(window) == keepNumber { continue }
+            if let keepWindow, CFEqual(window, keepWindow) { continue }
+            var subroleValue: CFTypeRef?
+            _ = AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue)
+            let subrole = subroleValue as? String ?? ""
+            if subrole == "AXDialog" || subrole == "AXSystemDialog" || subrole == "AXFloatingWindow" {
+                continue
+            }
+            if pressCloseButton(in: window) {
+                closed += 1
+            }
+        }
+        return closed
     }
 
     @objc private func closeAllFinderWindows() {
@@ -4768,7 +4848,13 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         historyBackgroundView?.layer?.backgroundColor = NSColor(hex: dropdownBackgroundColorHex).cgColor
         pathField.font = .monospacedSystemFont(ofSize: pathFontSize, weight: .regular)
         for button in iconButtons {
-            button.font = .systemFont(ofSize: iconSize, weight: .semibold)
+            if button === closeOthersButton {
+                applyCloseComboTitle(button, suffix: "o")
+            } else if button === closeAllButton {
+                applyCloseComboTitle(button, suffix: "a")
+            } else {
+                button.font = .systemFont(ofSize: iconSize, weight: .semibold)
+            }
         }
         for button in secondToolbarButtons {
             button.font = .systemFont(ofSize: pathFontSize, weight: .regular)
