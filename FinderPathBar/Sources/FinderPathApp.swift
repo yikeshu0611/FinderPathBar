@@ -219,9 +219,9 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private let maxPathLines: CGFloat = 3
     private var verticalGap: CGFloat { 0 }
     private var horizontalInset: CGFloat { 0 }
-    private var iconSize: CGFloat { CGFloat(defaults.double(forKey: "iconSize") == 0 ? 11 : defaults.double(forKey: "iconSize")) }
+    private var iconSize: CGFloat { CGFloat(defaults.double(forKey: "iconSize") == 0 ? 20 : defaults.double(forKey: "iconSize")) }
     private var iconHeight: CGFloat { CGFloat(defaults.double(forKey: "iconHeight") == 0 ? 24 : defaults.double(forKey: "iconHeight")) }
-    private var pathFontSize: CGFloat { CGFloat(defaults.double(forKey: "pathFontSize") == 0 ? 13 : defaults.double(forKey: "pathFontSize")) }
+    private var pathFontSize: CGFloat { CGFloat(defaults.double(forKey: "pathFontSize") == 0 ? 15 : defaults.double(forKey: "pathFontSize")) }
     private var textYOffset: CGFloat { CGFloat(defaults.double(forKey: "textYOffset")) }
     private var panelHeightOffset: CGFloat { CGFloat(defaults.double(forKey: "panelHeightOffset")) }
     private var backgroundColorHex: String { defaults.string(forKey: "backgroundColor") ?? "#f1f2f3" }
@@ -262,6 +262,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             )
         }
         _ = ensureAccessibilityPermission(prompt: true)
+        migrateDefaultSizingIfNeeded()
         configureStatusItem()
         configurePanel()
         updateHotKeyRegistrationForFrontmostApp()
@@ -314,6 +315,20 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         statusItem.menu = menu
     }
 
+    private func migrateDefaultSizingIfNeeded() {
+        let versionKey = "sizingDefaultsVersion"
+        guard defaults.integer(forKey: versionKey) < 1 else { return }
+        let storedIcon = defaults.object(forKey: "iconSize") as? Double
+        let storedText = defaults.object(forKey: "pathFontSize") as? Double
+        if storedIcon == nil || storedIcon == 11 {
+            defaults.set(20.0, forKey: "iconSize")
+        }
+        if storedText == nil || storedText == 13 {
+            defaults.set(15.0, forKey: "pathFontSize")
+        }
+        defaults.set(1, forKey: versionKey)
+    }
+
     private func localized(_ english: String, _ chinese: String) -> String {
         isChineseLanguage ? chinese : english
     }
@@ -350,7 +365,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         pathField.cell?.isScrollable = false
         pathField.cell?.lineBreakMode = .byCharWrapping
         pathField.focusRingType = .none
-        pathField.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        pathField.font = .monospacedSystemFont(ofSize: pathFontSize, weight: .regular)
         pathField.textColor = .labelColor
         pathField.placeholderString = "/Users/..."
         pathField.delegate = self
@@ -1025,7 +1040,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private func configureIconButton(_ button: NSButton) {
         button.bezelStyle = .regularSquare
         button.isBordered = false
-        button.font = .systemFont(ofSize: 11, weight: .semibold)
+        button.font = .systemFont(ofSize: iconSize, weight: .semibold)
         button.contentTintColor = .labelColor
         button.translatesAutoresizingMaskIntoConstraints = false
         button.sendAction(on: [.leftMouseUp])
