@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import CoreText
 import Darwin
 import ServiceManagement
 import UniformTypeIdentifiers
@@ -1024,39 +1025,49 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         button.sendAction(on: [.leftMouseUp])
     }
 
-    /// Same "x" as the first close button, with a larger o/a subscript at the bottom-right.
+    /// Same "x" as the first close button; o/a sit on x's bottom edge, slightly to the right.
     private func applyCloseComboTitle(_ button: NSButton, suffix: String) {
         let xFont = NSFont.systemFont(ofSize: iconSize, weight: .semibold)
         let suffixSize = max(7, iconSize * 0.62)
         let suffixFont = NSFont.systemFont(ofSize: suffixSize, weight: .medium)
-        let xText = "x" as NSString
-        let suffixText = suffix as NSString
-        let xAttrs: [NSAttributedString.Key: Any] = [
-            .font: xFont,
-            .foregroundColor: NSColor.black
-        ]
-        let suffixAttrs: [NSAttributedString.Key: Any] = [
-            .font: suffixFont,
-            .foregroundColor: NSColor.black
-        ]
-        let xSize = xText.size(withAttributes: xAttrs)
-        let suffixMetrics = suffixText.size(withAttributes: suffixAttrs)
+
+        func lineAndImageBounds(_ string: String, font: NSFont) -> (CTLine, CGRect) {
+            let attr = NSAttributedString(string: string, attributes: [
+                .font: font,
+                .foregroundColor: NSColor.black
+            ])
+            let line = CTLineCreateWithAttributedString(attr)
+            return (line, CTLineGetImageBounds(line, nil))
+        }
+
+        let (xLine, xBounds) = lineAndImageBounds("x", font: xFont)
+        let (suffixLine, suffixBounds) = lineAndImageBounds(suffix, font: suffixFont)
         let padding: CGFloat = 1
-        let overlap = max(1, suffixMetrics.width * 0.12)
-        let xOrigin = NSPoint(x: padding, y: 0)
-        let suffixOrigin = NSPoint(
-            x: xOrigin.x + xSize.width - overlap,
-            y: 0
+        let gap: CGFloat = 3.4
+        let xBaseline = CGPoint(x: padding - xBounds.minX, y: padding - xBounds.minY)
+        let suffixBaseline = CGPoint(
+            x: xBaseline.x + xBounds.maxX + gap - suffixBounds.minX,
+            y: xBaseline.y + xBounds.minY - suffixBounds.minY
         )
+        let maxX = max(xBaseline.x + xBounds.maxX, suffixBaseline.x + suffixBounds.maxX)
+        let maxY = max(xBaseline.y + xBounds.maxY, suffixBaseline.y + suffixBounds.maxY)
         let canvas = NSSize(
-            width: ceil(max(xOrigin.x + xSize.width, suffixOrigin.x + suffixMetrics.width) + padding),
-            height: ceil(max(iconHeight, xSize.height, suffixMetrics.height))
+            width: ceil(maxX + padding),
+            height: ceil(max(iconHeight, maxY + padding))
         )
-        let xDraw = NSPoint(x: xOrigin.x, y: (canvas.height - xSize.height) / 2)
-        let suffixDraw = NSPoint(x: suffixOrigin.x, y: xDraw.y)
+        let yLift = max(0, (canvas.height - maxY - padding) / 2)
         let image = NSImage(size: canvas, flipped: false) { _ in
-            xText.draw(at: xDraw, withAttributes: xAttrs)
-            suffixText.draw(at: suffixDraw, withAttributes: suffixAttrs)
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.saveGState()
+            ctx.textMatrix = .identity
+            ctx.translateBy(x: xBaseline.x, y: xBaseline.y + yLift)
+            CTLineDraw(xLine, ctx)
+            ctx.restoreGState()
+            ctx.saveGState()
+            ctx.textMatrix = .identity
+            ctx.translateBy(x: suffixBaseline.x, y: suffixBaseline.y + yLift)
+            CTLineDraw(suffixLine, ctx)
+            ctx.restoreGState()
             return true
         }
         image.isTemplate = true

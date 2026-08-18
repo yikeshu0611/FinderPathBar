@@ -41,6 +41,7 @@ swiftc \
   "$ROOT_DIR/Sources/main.swift" \
   -framework AppKit \
   -framework Carbon \
+  -framework CoreText \
   -framework ServiceManagement \
   -o "$APP_DIR/Contents/MacOS/$APP_NAME"
 
@@ -57,6 +58,7 @@ if [[ "$(uname -m)" == "arm64" ]]; then
     "$ROOT_DIR/Sources/main.swift" \
     -framework AppKit \
     -framework Carbon \
+    -framework CoreText \
     -framework ServiceManagement \
     -o "$TMP_X86" 2>/dev/null; then
     lipo -create "$TMP_ARM" "$TMP_X86" -output "$APP_DIR/Contents/MacOS/$APP_NAME"
