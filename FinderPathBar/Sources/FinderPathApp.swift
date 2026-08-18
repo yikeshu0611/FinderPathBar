@@ -135,6 +135,9 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private var lastNewItemCreatedAt = Date.distantPast
     private var hasPendingCut = false
     private var pendingCutURLs: [URL] = []
+    /// Main-thread flag for the CGEvent tap. Never read NSWorkspace from the tap
+    /// thread — it lags on app switch and the first ⌘V in the other app is eaten.
+    private var finderKeyTapArmed = false
     private var lastTrashedItems: [TrashedItemRecord] = []
     private var undoButton: NSButton?
     private var lastGlobalMouseDownAt = Date.distantPast
@@ -1140,9 +1143,12 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             if panel.isVisible {
                 startKeyEventTap()
             } else {
+                finderKeyTapArmed = false
                 stopKeyEventTap()
             }
         } else {
+            // Disarm before tearing the tap down so an in-flight key is not swallowed.
+            finderKeyTapArmed = false
             unregisterHotKeys()
             stopKeyEventTap()
         }
@@ -1323,6 +1329,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         hideToolbarMenu()
         hideAutocompletePanel()
         hideSearchPanel()
+        finderKeyTapArmed = false
+        unregisterHotKeys()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             // Only tear monitors down if Finder is still not frontmost.
@@ -2135,6 +2143,15 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         }
         suppressAutoHide(duration: 0.8)
         endPathEditing()
+        switch operation {
+        case .cut, .copy, .paste:
+            guard isFinderFrontmost else {
+                AppLogger.shared.log("performFinderOperation skipped outside Finder \(operation)")
+                return
+            }
+        default:
+            break
+        }
         // Freeze panel geometry before activating Finder / sending keys — otherwise
         // the follow timer remasures AX mid-rename and FP drops into the file list.
         if operation == .rename {
@@ -3811,9 +3828,11 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         // Only tap while Finder is frontmost and the path bar is visible.
         // Avoid leaving a system-wide key tap armed when switching to other apps.
         guard isFinderFrontmost, panel.isVisible, settingsPanel?.isVisible != true else {
+            finderKeyTapArmed = false
             stopKeyEventTap()
             return
         }
+        finderKeyTapArmed = true
         if keyEventTap != nil { return }
 
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
@@ -3853,6 +3872,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             },
             userInfo: refcon
         ) else {
+            finderKeyTapArmed = false
             AppLogger.shared.log("startKeyEventTap failed — Return interception unavailable")
             return
         }
@@ -3866,6 +3886,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private func stopKeyEventTap() {
+        finderKeyTapArmed = false
         if let keyEventTapRunLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), keyEventTapRunLoopSource, .commonModes)
             self.keyEventTapRunLoopSource = nil
@@ -3878,16 +3899,13 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private func shouldInterceptReturnKey(_ event: CGEvent) -> Bool {
-        guard panel.isVisible,
+        guard finderKeyTapArmed,
+              panel.isVisible,
               !isEditingPath,
               !isEditingSearch,
               !isFinderRenameHotKeysSuspended,
               settingsPanel?.isVisible != true,
               donationPanel?.isVisible != true else {
-            return false
-        }
-        // While Finder inline-rename is focused, let Return confirm natively.
-        if isFinderRenamingItem() {
             return false
         }
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
@@ -3900,43 +3918,44 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
               !flags.contains(.maskAlternate) else {
             return false
         }
-        return NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder"
+        return true
     }
 
-    /// Finder-only ⌘/⌃X cut, ⌘/⌃V paste, ⌘C copy. Never armed in other apps.
+    /// Finder-only clipboard keys. ⌘V is swallowed only for pending cut (move-on-paste).
+    /// Ordinary copy/paste of files must pass through, or the first ⌘V in the next
+    /// app after leaving Finder is eaten.
     private func finderClipboardOperation(for event: CGEvent) -> FinderOperation? {
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        guard keyCode == Int64(kVK_ANSI_V)
-                || keyCode == Int64(kVK_ANSI_X)
-                || keyCode == Int64(kVK_ANSI_C) else {
-            return nil
-        }
-        guard panel.isVisible,
+        guard finderKeyTapArmed,
+              panel.isVisible,
               !isEditingPath,
               !isEditingSearch,
               !isFinderRenameHotKeysSuspended,
               settingsPanel?.isVisible != true,
-              donationPanel?.isVisible != true,
-              NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder" else {
+              donationPanel?.isVisible != true else {
             return nil
         }
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags
         let command = flags.contains(.maskCommand)
         let control = flags.contains(.maskControl)
         guard !flags.contains(.maskShift), !flags.contains(.maskAlternate) else { return nil }
-        let operation: FinderOperation?
-        if keyCode == Int64(kVK_ANSI_V), command || control {
-            operation = .paste
-        } else if keyCode == Int64(kVK_ANSI_X), command || control {
-            operation = .cut
-        } else if keyCode == Int64(kVK_ANSI_C), command, !control {
-            operation = .copy
-        } else {
-            operation = nil
+
+        if keyCode == Int64(kVK_ANSI_C), command, !control {
+            if hasPendingCut {
+                DispatchQueue.main.async { [weak self] in
+                    self?.hasPendingCut = false
+                    self?.pendingCutURLs.removeAll()
+                }
+            }
+            return nil
         }
-        guard operation != nil else { return nil }
-        if isFinderRenamingItem() { return nil }
-        return operation
+        if keyCode == Int64(kVK_ANSI_X), command || control {
+            return .cut
+        }
+        if keyCode == Int64(kVK_ANSI_V), command || control, hasPendingCut {
+            return .paste
+        }
+        return nil
     }
 
     private func dispatchButtonClick(at windowPoint: NSPoint) -> Bool {
