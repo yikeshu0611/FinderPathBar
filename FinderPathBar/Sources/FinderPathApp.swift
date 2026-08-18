@@ -5244,33 +5244,56 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         let destination = updateInstallDestinationURL()
         let scriptURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("FinderPathBar-update-\(UUID().uuidString).sh")
+        let logURL = AppLogger.shared.logURL.deletingLastPathComponent()
+            .appendingPathComponent("update-install.log")
+        let pid = ProcessInfo.processInfo.processIdentifier
         let script = """
         #!/bin/bash
         set -euo pipefail
-        PID="\(ProcessInfo.processInfo.processIdentifier)"
-        DMG="\(dmgURL.path)"
-        DEST="\(destination.path)"
-        MOUNT_OUT="$(hdiutil attach -nobrowse -readonly "$DMG")"
-        MOUNT="$(echo "$MOUNT_OUT" | awk '/\\/Volumes\\//{print $NF; exit}')"
-        if [[ -z "$MOUNT" ]]; then
-          echo "mount failed" >&2
-          exit 1
-        fi
-        APP="$(find "$MOUNT" -maxdepth 2 -name "*.app" -type d | head -n 1)"
-        if [[ -z "$APP" ]]; then
-          hdiutil detach "$MOUNT" -quiet || true
-          echo "app not found" >&2
-          exit 1
-        fi
+        LOG=\(bashSingleQuoted(logURL.path))
+        PID=\(pid)
+        DMG=\(bashSingleQuoted(dmgURL.path))
+        DEST=\(bashSingleQuoted(destination.path))
+        mkdir -p "$(dirname "$LOG")"
+        exec >>"$LOG" 2>&1
+        echo "==== $(date) version=\(version) start ===="
+        echo "pid=$PID dest=$DEST dmg=$DMG"
         while kill -0 "$PID" 2>/dev/null; do sleep 0.3; done
-        sleep 0.8
+        echo "app exited"
+        sleep 1
+        if /usr/bin/pgrep -x FinderPathBar >/dev/null 2>&1; then
+          echo "stopping relaunched FinderPathBar"
+          /usr/bin/pkill -x FinderPathBar || true
+          sleep 0.5
+        fi
+        xattr -cr "$DMG" >/dev/null 2>&1 || true
+        MOUNT="$(mktemp -d /tmp/FinderPathBar-mnt-XXXXXX)"
+        echo "attaching to $MOUNT"
+        hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$MOUNT" "$DMG"
+        APP="$MOUNT/FinderPathBar.app"
+        if [[ ! -d "$APP" ]]; then
+          echo "app not found in dmg"
+          hdiutil detach "$MOUNT" -force -quiet || true
+          exit 1
+        fi
+        NEW="${DEST}.updating"
+        OLD="${DEST}.old"
+        rm -rf "$NEW" "$OLD"
         mkdir -p "$(dirname "$DEST")"
-        rm -rf "$DEST"
-        ditto "$APP" "$DEST"
-        xattr -cr "$DEST" >/dev/null 2>&1 || true
-        hdiutil detach "$MOUNT" -quiet || true
+        echo "copying to $NEW"
+        ditto "$APP" "$NEW"
+        xattr -cr "$NEW" >/dev/null 2>&1 || true
+        hdiutil detach "$MOUNT" -force -quiet || true
+        rmdir "$MOUNT" 2>/dev/null || true
+        if [[ -d "$DEST" ]]; then
+          mv "$DEST" "$OLD" || rm -rf "$DEST"
+        fi
+        mv "$NEW" "$DEST"
+        rm -rf "$OLD" || true
         rm -f "$DMG"
+        echo "opening $DEST"
         open "$DEST"
+        echo "==== $(date) done ===="
         """
         do {
             try script.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -5281,13 +5304,24 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             return
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [scriptURL.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        // Process.deinit kills a still-running child. Detach with nohup so the
+        // installer survives both deallocation and NSApp.terminate.
+        let launcher = Process()
+        launcher.executableURL = URL(fileURLWithPath: "/bin/bash")
+        launcher.arguments = [
+            "-c",
+            "nohup /bin/bash \(bashSingleQuoted(scriptURL.path)) >/dev/null 2>&1 &"
+        ]
         do {
-            try process.run()
+            try launcher.run()
+            launcher.waitUntilExit()
+            guard launcher.terminationStatus == 0 else {
+                throw NSError(
+                    domain: "FinderPathBar",
+                    code: Int(launcher.terminationStatus),
+                    userInfo: [NSLocalizedDescriptionKey: "installer launch status \(launcher.terminationStatus)"]
+                )
+            }
         } catch {
             AppLogger.shared.log("update script launch failed: \(error.localizedDescription)")
             showCloseFailure(localized("Couldn't start installer", "无法启动安装"))
@@ -5297,9 +5331,13 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         AppLogger.shared.log("update installing version=\(version) dest=\(destination.path)")
         settingsPanel?.orderOut(nil)
         showCloseFailure(localized("Installing update, app will restart…", "正在安装更新，应用即将重启…"))
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             NSApp.terminate(nil)
         }
+    }
+
+    private func bashSingleQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     private func updateInstallDestinationURL() -> URL {
