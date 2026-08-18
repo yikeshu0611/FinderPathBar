@@ -1098,12 +1098,11 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         registerHotKey(keyCode: UInt32(kVK_ANSI_W), id: 7)
         registerHotKey(keyCode: UInt32(kVK_F2), id: 8, modifiers: 0)
         registerHotKey(keyCode: UInt32(kVK_ANSI_F), id: 9)
-        // Finder has no native file Cut; intercept so move-on-paste works.
-        registerHotKey(keyCode: UInt32(kVK_ANSI_X), id: 15) // Cmd+X cut
-        registerHotKey(keyCode: UInt32(kVK_ANSI_X), id: 16, modifiers: UInt32(controlKey)) // Ctrl+X
-        registerHotKey(keyCode: UInt32(kVK_ANSI_V), id: 17) // Cmd+V paste (move if cut pending)
-        registerHotKey(keyCode: UInt32(kVK_ANSI_V), id: 18, modifiers: UInt32(controlKey)) // Ctrl+V
-        registerHotKey(keyCode: UInt32(kVK_ANSI_C), id: 19) // Cmd+C copy (clears cut pending)
+        // Do NOT register Cmd/Ctrl+C/X/V as Carbon hotkeys. Those steal the
+        // key from every app until Finder-deactivation is observed — so the
+        // first ⌘V after leaving Finder (typically pasting files copied there)
+        // is swallowed. Clipboard shortcuts are handled by the Finder-only
+        // CGEvent tap instead.
 
         if !isHotKeyHandlerInstalled {
             var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -3597,6 +3596,10 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         suppressAutoAttachUntil = nil
         guard !isAutoHideSuppressed else { return }
         guard shouldUseFinderWindowContext else {
+            if !hotKeyRefs.isEmpty {
+                unregisterHotKeys()
+            }
+            stopKeyEventTap()
             if panel.isVisible {
                 hidePanelAutomatically()
             }
@@ -3834,14 +3837,19 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
                     return Unmanaged.passUnretained(event)
                 }
                 let app = Unmanaged<FinderPathApp>.fromOpaque(refcon).takeUnretainedValue()
-                guard app.shouldInterceptReturnKey(event) else {
-                    return Unmanaged.passUnretained(event)
+                if app.shouldInterceptReturnKey(event) {
+                    DispatchQueue.main.async {
+                        app.handleEnterKeyForFinder()
+                    }
+                    return nil
                 }
-                DispatchQueue.main.async {
-                    app.handleEnterKeyForFinder()
+                if let operation = app.finderClipboardOperation(for: event) {
+                    DispatchQueue.main.async {
+                        app.performFinderOperation(operation)
+                    }
+                    return nil
                 }
-                // Swallow Return so Finder does not also act on it.
-                return nil
+                return Unmanaged.passUnretained(event)
             },
             userInfo: refcon
         ) else {
@@ -3854,7 +3862,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             CFRunLoopAddSource(CFRunLoopGetMain(), keyEventTapRunLoopSource, .commonModes)
         }
         CGEvent.tapEnable(tap: tap, enable: true)
-        AppLogger.shared.log("keyEventTap started for Return")
+        AppLogger.shared.log("keyEventTap started for Return and clipboard")
     }
 
     private func stopKeyEventTap() {
@@ -3893,6 +3901,42 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             return false
         }
         return NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder"
+    }
+
+    /// Finder-only ⌘/⌃X cut, ⌘/⌃V paste, ⌘C copy. Never armed in other apps.
+    private func finderClipboardOperation(for event: CGEvent) -> FinderOperation? {
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        guard keyCode == Int64(kVK_ANSI_V)
+                || keyCode == Int64(kVK_ANSI_X)
+                || keyCode == Int64(kVK_ANSI_C) else {
+            return nil
+        }
+        guard panel.isVisible,
+              !isEditingPath,
+              !isEditingSearch,
+              !isFinderRenameHotKeysSuspended,
+              settingsPanel?.isVisible != true,
+              donationPanel?.isVisible != true,
+              NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder" else {
+            return nil
+        }
+        let flags = event.flags
+        let command = flags.contains(.maskCommand)
+        let control = flags.contains(.maskControl)
+        guard !flags.contains(.maskShift), !flags.contains(.maskAlternate) else { return nil }
+        let operation: FinderOperation?
+        if keyCode == Int64(kVK_ANSI_V), command || control {
+            operation = .paste
+        } else if keyCode == Int64(kVK_ANSI_X), command || control {
+            operation = .cut
+        } else if keyCode == Int64(kVK_ANSI_C), command, !control {
+            operation = .copy
+        } else {
+            operation = nil
+        }
+        guard operation != nil else { return nil }
+        if isFinderRenamingItem() { return nil }
+        return operation
     }
 
     private func dispatchButtonClick(at windowPoint: NSPoint) -> Bool {
