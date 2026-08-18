@@ -1292,6 +1292,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         // used to recurse until stack overflow (SIGSEGV) when leaving Finder.
         guard !isHidingOrDetachingPanel else { return }
         guard force || !isAutoHideSuppressed else { return }
+        guard force || !isNavigatingHistory else { return }
+        AppLogger.shared.log("hidePanelAutomatically force=\(force)")
         isHidingOrDetachingPanel = true
         defer { isHidingOrDetachingPanel = false }
         endFolderSearch(collapse: true, updateLayout: false)
@@ -2536,6 +2538,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         guard !folderBookmarks.isEmpty else { return }
 
+        suppressAutoHide(duration: 2.5)
         let menu = NSMenu(title: folder)
         let itemFont = NSFont.systemFont(ofSize: pathFontSize, weight: .regular)
         let rowWidth = max(
@@ -2717,7 +2720,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             return
         }
 
-        suppressAutoHide(duration: 1.5)
+        suppressAutoHide(duration: 2.5)
         isNavigatingHistory = true
         ignoreNextSyncRecordUntil = Date().addingTimeInterval(0.35)
 
@@ -3001,6 +3004,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private func beginPathEditing() {
         guard !isEditingPath else { return }
         guard let panel = panel as? AddressBarPanel else { return }
+        suppressAutoHide(duration: 2.5)
         endFolderSearch(collapse: true)
         hideAutocompletePanel()
         enablePanelEditingMode()
@@ -3599,7 +3603,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             return
         }
         guard frontFinderWindowBounds() != nil else {
-            guard !shouldKeepPanelVisibleWhileFinderWindowChanges() else { return }
+            if shouldKeepPanelVisibleWhileFinderWindowChanges() { return }
             finderWindowUnavailableSince = nil
             lastMainContentBounds = nil
             lastMainContentWindowID = nil
@@ -3636,7 +3640,11 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private func suppressAutoHide(duration: TimeInterval = 0.8) {
-        suppressAutoHideUntil = Date().addingTimeInterval(duration)
+        let until = Date().addingTimeInterval(duration)
+        if let suppressAutoHideUntil, suppressAutoHideUntil > until {
+            return
+        }
+        suppressAutoHideUntil = until
     }
 
     private func beginFinderWindowTransition() {
@@ -3648,12 +3656,15 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private func shouldKeepPanelVisibleWhileFinderWindowChanges() -> Bool {
+        if isNavigatingHistory || isEditingPath || isAutoHideSuppressed {
+            return true
+        }
         let now = Date()
         if finderWindowUnavailableSince == nil {
             finderWindowUnavailableSince = now
         }
         guard let finderWindowUnavailableSince else { return false }
-        return now.timeIntervalSince(finderWindowUnavailableSince) < 0.45
+        return now.timeIntervalSince(finderWindowUnavailableSince) < 1.2
     }
 
     private func startMouseMonitor() {
@@ -4197,7 +4208,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             return
         }
         guard let finderWindowBounds = frontFinderWindowBounds() else {
-            guard !shouldKeepPanelVisibleWhileFinderWindowChanges() else { return }
+            if shouldKeepPanelVisibleWhileFinderWindowChanges() { return }
             finderWindowUnavailableSince = nil
             attachedFinderWindowID = nil
             lastMainContentBounds = nil
@@ -4362,10 +4373,16 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private var shouldUseFinderWindowContext: Bool {
-        // A transient Finder-window read can hide FP while FinderPathBar is
-        // still frontmost. Do not require the panel to already be visible to
-        // recover from that state; the attached Finder window is sufficient.
-        isFinderFrontmost || (isFinderPathBarFrontmost && attachedFinderWindowID != nil)
+        // Clicking the path bar / bookmarks activates FinderPathBar. Keep the
+        // bar up in that case — requiring an attached window ID made it hide
+        // as soon as Finder finished (or briefly lost) focus.
+        if isFinderFrontmost || isFinderPathBarFrontmost {
+            return true
+        }
+        if panel.isVisible, isNavigatingHistory || isEditingPath {
+            return true
+        }
+        return false
     }
 
     private func defaultPanelFrame(lightweight: Bool = false) -> NSRect? {
