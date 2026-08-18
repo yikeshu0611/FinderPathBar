@@ -1024,19 +1024,43 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         button.sendAction(on: [.leftMouseUp])
     }
 
-    /// Match the first-row close "x", then append o/a at the same size.
+    /// Match the first-row close "x"; o/a are ~1/3 as large, drawn as a raised suffix.
     private func applyCloseComboTitle(_ button: NSButton, suffix: String) {
         let xFont = NSFont.systemFont(ofSize: iconSize, weight: .semibold)
-        let title = NSMutableAttributedString()
-        title.append(NSAttributedString(string: "x", attributes: [
-            .font: xFont,
-            .foregroundColor: NSColor.labelColor
-        ]))
-        title.append(NSAttributedString(string: suffix, attributes: [
-            .font: xFont,
-            .foregroundColor: NSColor.labelColor
-        ]))
-        button.attributedTitle = title
+        let suffixSize = max(4.5, iconSize / 3)
+        let suffixFont = NSFont.systemFont(ofSize: suffixSize, weight: .semibold)
+        let xText = "x" as NSString
+        let suffixText = suffix as NSString
+        let xSize = xText.size(withAttributes: [.font: xFont])
+        let suffixMetrics = suffixText.size(withAttributes: [.font: suffixFont])
+        let padding: CGFloat = 1
+        let gap: CGFloat = 0.4
+        let canvas = NSSize(
+            width: ceil(xSize.width + gap + suffixMetrics.width + padding * 2),
+            height: max(iconHeight, ceil(xSize.height))
+        )
+        let image = NSImage(size: canvas, flipped: false) { rect in
+            let xOrigin = NSPoint(x: padding, y: (rect.height - xSize.height) / 2)
+            xText.draw(at: xOrigin, withAttributes: [
+                .font: xFont,
+                .foregroundColor: NSColor.black
+            ])
+            let suffixOrigin = NSPoint(
+                x: xOrigin.x + xSize.width + gap,
+                y: xOrigin.y + xSize.height - suffixMetrics.height - max(0.5, xSize.height * 0.06)
+            )
+            suffixText.draw(at: suffixOrigin, withAttributes: [
+                .font: suffixFont,
+                .foregroundColor: NSColor.black
+            ])
+            return true
+        }
+        image.isTemplate = true
+        button.title = ""
+        button.attributedTitle = NSAttributedString()
+        button.image = image
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleProportionallyDown
     }
 
     private func showToolbarMenu(from sourceButton: NSButton, items: [ToolbarMenuItem]) {
