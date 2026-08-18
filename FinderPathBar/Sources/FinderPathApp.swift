@@ -71,7 +71,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private var searchPanel: NSPanel?
     private var searchListView: AutocompleteListView?
     private var searchCandidates: [URL] = []
-    private var searchSelectedIndex = 0
+    private var searchSelectedIndex = -1
     private var searchRootPath: String = ""
     private var searchTotalMatchCount = 0
     private var searchUpdateWorkItem: DispatchWorkItem?
@@ -3537,7 +3537,11 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             return true
         case #selector(NSResponder.moveUp(_:)):
             guard !searchCandidates.isEmpty else { return false }
-            searchSelectedIndex = max(0, searchSelectedIndex - 1)
+            if searchSelectedIndex < 0 {
+                searchSelectedIndex = searchCandidates.count - 1
+            } else {
+                searchSelectedIndex = max(0, searchSelectedIndex - 1)
+            }
             searchListView?.select(index: searchSelectedIndex)
             return true
         case #selector(NSResponder.insertNewline(_:)):
@@ -3571,7 +3575,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         }
         let candidates = folderSearchCandidates(query: query)
         searchCandidates = candidates
-        searchSelectedIndex = 0
+        searchSelectedIndex = -1
         guard !candidates.isEmpty else {
             hideSearchPanel()
             return
@@ -3786,7 +3790,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private func hideSearchPanel() {
         searchPanel?.orderOut(nil)
         searchCandidates = []
-        searchSelectedIndex = 0
+        searchSelectedIndex = -1
     }
 
     private func enablePanelEditingMode() {
@@ -8084,10 +8088,11 @@ private final class AutocompleteListView: NSView {
     }
 
     func select(index: Int) {
-        guard rows.indices.contains(index) else { return }
         selectedIndex = index
         rebuild()
-        scrollSelectedIntoView()
+        if rows.indices.contains(index) {
+            scrollSelectedIntoView()
+        }
         updateHoverForCurrentMouseLocation()
     }
 
@@ -8125,6 +8130,7 @@ private final class AutocompleteListView: NSView {
     }
 
     private func scrollSelectedIntoView() {
+        guard rows.indices.contains(selectedIndex) else { return }
         let contentHeight = documentView.bounds.height
         let selectedTop = contentHeight - CGFloat(selectedIndex + 1) * rowHeight
         let visible = scrollView.contentView.bounds
