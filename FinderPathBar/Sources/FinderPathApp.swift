@@ -1024,31 +1024,30 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         button.sendAction(on: [.leftMouseUp])
     }
 
-    /// Match the first-row close "x"; o/a are ~1/3 as large, drawn as a raised suffix.
+    /// Match the first-row close "x"; o/a sit at the bottom-right, smaller than x.
     private func applyCloseComboTitle(_ button: NSButton, suffix: String) {
         let xFont = NSFont.systemFont(ofSize: iconSize, weight: .semibold)
-        let suffixSize = max(4.5, iconSize / 3)
+        let suffixSize = max(6, iconSize * 0.52)
         let suffixFont = NSFont.systemFont(ofSize: suffixSize, weight: .semibold)
         let xText = "x" as NSString
         let suffixText = suffix as NSString
         let xSize = xText.size(withAttributes: [.font: xFont])
         let suffixMetrics = suffixText.size(withAttributes: [.font: suffixFont])
         let padding: CGFloat = 1
-        let gap: CGFloat = 0.4
-        let canvas = NSSize(
-            width: ceil(xSize.width + gap + suffixMetrics.width + padding * 2),
-            height: max(iconHeight, ceil(xSize.height))
+        let xOrigin = NSPoint(x: padding, y: max(0, suffixMetrics.height * 0.12))
+        let suffixOrigin = NSPoint(
+            x: xOrigin.x + xSize.width * 0.55,
+            y: 0
         )
-        let image = NSImage(size: canvas, flipped: false) { rect in
-            let xOrigin = NSPoint(x: padding, y: (rect.height - xSize.height) / 2)
+        let canvas = NSSize(
+            width: ceil(max(xOrigin.x + xSize.width, suffixOrigin.x + suffixMetrics.width) + padding),
+            height: ceil(max(iconHeight, xOrigin.y + xSize.height, suffixOrigin.y + suffixMetrics.height))
+        )
+        let image = NSImage(size: canvas, flipped: false) { _ in
             xText.draw(at: xOrigin, withAttributes: [
                 .font: xFont,
                 .foregroundColor: NSColor.black
             ])
-            let suffixOrigin = NSPoint(
-                x: xOrigin.x + xSize.width + gap,
-                y: xOrigin.y + xSize.height - suffixMetrics.height - max(0.5, xSize.height * 0.06)
-            )
             suffixText.draw(at: suffixOrigin, withAttributes: [
                 .font: suffixFont,
                 .foregroundColor: NSColor.black
