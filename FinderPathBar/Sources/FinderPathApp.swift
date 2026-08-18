@@ -1024,12 +1024,12 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         button.sendAction(on: [.leftMouseUp])
     }
 
-    /// Capital X with a smaller o/a subscript at the bottom-right (Xₒ / Xₐ).
+    /// Same "x" as the first close button, with a larger o/a subscript at the bottom-right.
     private func applyCloseComboTitle(_ button: NSButton, suffix: String) {
         let xFont = NSFont.systemFont(ofSize: iconSize, weight: .semibold)
-        let suffixSize = max(6.5, iconSize * 0.48)
+        let suffixSize = max(7, iconSize * 0.62)
         let suffixFont = NSFont.systemFont(ofSize: suffixSize, weight: .medium)
-        let xText = "X" as NSString
+        let xText = "x" as NSString
         let suffixText = suffix as NSString
         let xAttrs: [NSAttributedString.Key: Any] = [
             .font: xFont,
@@ -1042,7 +1042,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         let xSize = xText.size(withAttributes: xAttrs)
         let suffixMetrics = suffixText.size(withAttributes: suffixAttrs)
         let padding: CGFloat = 1
-        let overlap = max(1, suffixMetrics.width * 0.18)
+        let overlap = max(1, suffixMetrics.width * 0.12)
         let xOrigin = NSPoint(x: padding, y: 0)
         let suffixOrigin = NSPoint(
             x: xOrigin.x + xSize.width - overlap,
