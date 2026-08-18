@@ -1024,34 +1024,39 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         button.sendAction(on: [.leftMouseUp])
     }
 
-    /// Match the first-row close "x"; o/a sit at the bottom-right, smaller than x.
+    /// Capital X with a smaller o/a subscript at the bottom-right (Xₒ / Xₐ).
     private func applyCloseComboTitle(_ button: NSButton, suffix: String) {
         let xFont = NSFont.systemFont(ofSize: iconSize, weight: .semibold)
-        let suffixSize = max(6, iconSize * 0.52)
-        let suffixFont = NSFont.systemFont(ofSize: suffixSize, weight: .semibold)
-        let xText = "x" as NSString
+        let suffixSize = max(6.5, iconSize * 0.48)
+        let suffixFont = NSFont.systemFont(ofSize: suffixSize, weight: .medium)
+        let xText = "X" as NSString
         let suffixText = suffix as NSString
-        let xSize = xText.size(withAttributes: [.font: xFont])
-        let suffixMetrics = suffixText.size(withAttributes: [.font: suffixFont])
+        let xAttrs: [NSAttributedString.Key: Any] = [
+            .font: xFont,
+            .foregroundColor: NSColor.black
+        ]
+        let suffixAttrs: [NSAttributedString.Key: Any] = [
+            .font: suffixFont,
+            .foregroundColor: NSColor.black
+        ]
+        let xSize = xText.size(withAttributes: xAttrs)
+        let suffixMetrics = suffixText.size(withAttributes: suffixAttrs)
         let padding: CGFloat = 1
-        let xOrigin = NSPoint(x: padding, y: max(0, suffixMetrics.height * 0.12))
+        let overlap = max(1, suffixMetrics.width * 0.18)
+        let xOrigin = NSPoint(x: padding, y: 0)
         let suffixOrigin = NSPoint(
-            x: xOrigin.x + xSize.width * 0.55,
+            x: xOrigin.x + xSize.width - overlap,
             y: 0
         )
         let canvas = NSSize(
             width: ceil(max(xOrigin.x + xSize.width, suffixOrigin.x + suffixMetrics.width) + padding),
-            height: ceil(max(iconHeight, xOrigin.y + xSize.height, suffixOrigin.y + suffixMetrics.height))
+            height: ceil(max(iconHeight, xSize.height, suffixMetrics.height))
         )
+        let xDraw = NSPoint(x: xOrigin.x, y: (canvas.height - xSize.height) / 2)
+        let suffixDraw = NSPoint(x: suffixOrigin.x, y: xDraw.y)
         let image = NSImage(size: canvas, flipped: false) { _ in
-            xText.draw(at: xOrigin, withAttributes: [
-                .font: xFont,
-                .foregroundColor: NSColor.black
-            ])
-            suffixText.draw(at: suffixOrigin, withAttributes: [
-                .font: suffixFont,
-                .foregroundColor: NSColor.black
-            ])
+            xText.draw(at: xDraw, withAttributes: xAttrs)
+            suffixText.draw(at: suffixDraw, withAttributes: suffixAttrs)
             return true
         }
         image.isTemplate = true
@@ -1059,7 +1064,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         button.attributedTitle = NSAttributedString()
         button.image = image
         button.imagePosition = .imageOnly
-        button.imageScaling = .scaleProportionallyDown
+        button.imageScaling = .scaleNone
     }
 
     private func showToolbarMenu(from sourceButton: NSButton, items: [ToolbarMenuItem]) {
