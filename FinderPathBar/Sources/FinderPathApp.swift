@@ -1523,9 +1523,16 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             notifyFinderAboutCreatedItem(createdURL, in: directory)
             AppLogger.shared.log("createNewItem success path=\(createdURL.path)")
             if openAfterCreate {
-                openCreatedItem(createdURL, isDirectory: extensionName == nil)
-                refreshPathFromFinder()
-                updatePanelFrame()
+                if extensionName == nil {
+                    openCreatedItem(createdURL, isDirectory: true)
+                    refreshPathFromFinder()
+                    updatePanelFrame()
+                } else {
+                    selectCreatedFinderItem(createdURL)
+                    openCreatedItem(createdURL, isDirectory: false)
+                }
+            } else {
+                selectCreatedFinderItem(createdURL)
             }
             return createdURL
         } catch {
@@ -1539,6 +1546,18 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private func notifyFinderAboutCreatedItem(_ url: URL, in directory: URL) {
         NSWorkspace.shared.noteFileSystemChanged(url.path)
         NSWorkspace.shared.noteFileSystemChanged(directory.path)
+    }
+
+    /// After FileManager creates an item, Finder often needs a beat to show it.
+    /// Reveal + select so the new file/folder is highlighted in the current window.
+    private func selectCreatedFinderItem(_ url: URL) {
+        AppLogger.shared.log("selectCreatedFinderItem path=\(url.path)")
+        refocusAttachedFinderWindow(activateFinder: true)
+        selectFinderItem(url, after: 0.08)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+        selectFinderItem(url, after: 0.28)
     }
 
     private func openCreatedItem(_ url: URL, isDirectory: Bool) {
@@ -6398,7 +6417,10 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             tell application "Finder"
                 if (count of Finder windows) = 0 then return
                 try
-                    set selection to {POSIX file "\(escapedAppleScript(path))" as alias}
+                    update front Finder window
+                    set theItem to POSIX file "\(escapedAppleScript(path))"
+                    reveal theItem
+                    select theItem
                 end try
             end tell
             """)
