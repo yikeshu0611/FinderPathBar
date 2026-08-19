@@ -1563,16 +1563,25 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         NSWorkspace.shared.noteFileSystemChanged(directory.path)
     }
 
-    /// After FileManager creates an item, Finder often needs a beat to show it.
-    /// Reveal + select so the new file/folder is highlighted in the current window.
-    private func selectCreatedFinderItem(_ url: URL) {
-        AppLogger.shared.log("selectCreatedFinderItem path=\(url.path)")
-        refocusAttachedFinderWindow(activateFinder: true)
+    /// Reveal + select in the attached Finder window. Finder often needs a beat
+    /// after changing folders before selection sticks.
+    private func revealAndSelectFinderItem(_ url: URL, activateFinder: Bool = true) {
+        AppLogger.shared.log("revealAndSelectFinderItem path=\(url.path)")
+        if activateFinder {
+            refocusAttachedFinderWindow(activateFinder: true)
+        }
         selectFinderItem(url, after: 0.08)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
             NSWorkspace.shared.activateFileViewerSelecting([url])
         }
         selectFinderItem(url, after: 0.28)
+        selectFinderItem(url, after: 0.45)
+    }
+
+    /// After FileManager creates an item, Finder often needs a beat to show it.
+    /// Reveal + select so the new file/folder is highlighted in the current window.
+    private func selectCreatedFinderItem(_ url: URL) {
+        revealAndSelectFinderItem(url)
     }
 
     private func openCreatedItem(_ url: URL, isDirectory: Bool) {
@@ -6346,7 +6355,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
                 self?.updatePanelFrame()
             }
             if let selectionURL {
-                self.selectFinderItem(selectionURL, after: 0.04)
+                self.revealAndSelectFinderItem(selectionURL)
             }
         }
     }
