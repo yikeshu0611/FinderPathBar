@@ -6590,9 +6590,11 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             ?? findFrontFileDialog()?.bounds
         guard let windowFrame, windowFrame.width > 40 else { return nil }
         let height = currentPanelHeight(forWidth: windowFrame.width)
+        // Sit above the dialog so the native title bar (traffic lights / folder name)
+        // stays visible — same vertical pinning as Finder windows.
         return NSRect(
             x: windowFrame.minX,
-            y: windowFrame.maxY - height,
+            y: windowFrame.maxY + verticalGap,
             width: windowFrame.width,
             height: height
         )
