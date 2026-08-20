@@ -166,6 +166,12 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private var suppressAutoAttachUntil: Date?
     private var ignoreNextSyncRecordUntil: Date?
     private var attachedFinderWindowID: Int?
+    /// When true, the path bar is attached to another app's Open/Save file dialog.
+    private var isFileDialogMode = false
+    private var attachedFileDialogPID: pid_t?
+    private var lastFileDialogBounds: NSRect?
+    private var lastFileDialogPathSyncAt = Date.distantPast
+    private var isNavigatingFileDialog = false
     private var lastMainContentBounds: NSRect?
     private var lastMainContentWindowID: Int?
     private var lastFinderWindowBounds: NSRect?
@@ -1414,6 +1420,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         isHidingOrDetachingPanel = true
         defer { isHidingOrDetachingPanel = false }
 
+        clearFileDialogMode()
         pendingFinderReattachWorkItem?.cancel()
         pendingFinderReattachWorkItem = nil
         stopFollowingFinder()
@@ -1430,7 +1437,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             // Only tear monitors down if Finder is still not frontmost.
-            guard !self.isFinderFrontmost else { return }
+            guard !self.isFinderFrontmost, !self.isFileDialogMode else { return }
             self.stopMouseMonitor()
             self.stopKeyEventTap()
         }
@@ -1449,6 +1456,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
 
         guard !isAutoHideSuppressed else { return }
         if app.bundleIdentifier == "com.apple.finder" {
+            clearFileDialogMode()
             manuallyHidden = false
             pendingFinderReattachWorkItem?.cancel()
             // Delay reattach so document apps finish activating and Finder settles.
@@ -1462,8 +1470,14 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             pendingFinderReattachWorkItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
         } else if app.bundleIdentifier != Bundle.main.bundleIdentifier {
-            AppLogger.shared.log("activeApp hidePanel app=\(app.bundleIdentifier ?? app.localizedName ?? "?")")
-            detachFromFinderForOtherApp()
+            if let dialog = findFrontFileDialog() {
+                AppLogger.shared.log("activeApp fileDialog app=\(app.bundleIdentifier ?? app.localizedName ?? "?")")
+                enterFileDialogMode(dialog)
+            } else {
+                AppLogger.shared.log("activeApp hidePanel app=\(app.bundleIdentifier ?? app.localizedName ?? "?")")
+                clearFileDialogMode()
+                detachFromFinderForOtherApp()
+            }
         }
     }
 
@@ -1503,6 +1517,10 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         let expanded = (input as NSString).expandingTildeInPath
         let path = expanded.hasPrefix("/") ? expanded : (NSHomeDirectory() as NSString).appendingPathComponent(expanded)
         endPathEditing()
+        if isFileDialogMode {
+            navigateFileDialog(to: path, source: "address-bar")
+            return
+        }
         navigateFinder(to: path, source: "address-bar")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.refocusAttachedFinderWindow(activateFinder: true)
@@ -2823,6 +2841,10 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     /// AppleScript is often busy right after menu clicks / parent navigation;
     /// failing immediately caused "无法打开 Finder 位置" for bookmarks.
     private func navigateFinder(to rawPath: String, source: String, attempt: Int = 0) {
+        if isFileDialogMode {
+            navigateFileDialog(to: rawPath, source: source)
+            return
+        }
         let normalizedPath = normalizePath((rawPath as NSString).expandingTildeInPath)
         guard !normalizedPath.isEmpty else {
             NSSound.beep()
@@ -3113,12 +3135,15 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         // A navigation may temporarily run the main event loop while Finder
         // processes its Apple event. Ignore repeated clicks until that
         // navigation has finished, rather than queueing another transition.
-        guard !isNavigatingHistory else {
+        guard !isNavigatingHistory, !isNavigatingFileDialog else {
             AppLogger.shared.log("goToParentDirectory ignored while navigation is in progress")
             return
         }
-        let currentPath = currentFinderPath() ?? directoryURLFromPathField()?.path ?? normalizePath(pathField.stringValue)
-        AppLogger.shared.log("goToParentDirectory current=\(currentPath)")
+        let currentPath = (isFileDialogMode ? normalizePath(pathField.stringValue) : nil)
+            ?? currentFinderPath()
+            ?? directoryURLFromPathField()?.path
+            ?? normalizePath(pathField.stringValue)
+        AppLogger.shared.log("goToParentDirectory current=\(currentPath) fileDialog=\(isFileDialogMode)")
         suppressAutoHide(duration: 1.5)
         guard !currentPath.isEmpty else {
             NSSound.beep()
@@ -3131,6 +3156,10 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
               FileManager.default.fileExists(atPath: parentURL.path) else {
             NSSound.beep()
             AppLogger.shared.log("goToParentDirectory skipped parent=\(parentURL.path)")
+            return
+        }
+        if isFileDialogMode {
+            navigateFileDialog(to: parentURL.path, source: "parent")
             return
         }
         let pathToSelect = currentURL
@@ -3869,6 +3898,24 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         }
         suppressAutoAttachUntil = nil
         guard !isAutoHideSuppressed else { return }
+
+        // Prefer Open/Save dialogs when a non-Finder app is frontmost.
+        if !isFinderFrontmost, let dialog = findFrontFileDialog() {
+            enterFileDialogMode(dialog)
+            return
+        }
+        if isFileDialogMode, !isFinderFrontmost {
+            if let dialog = findFrontFileDialog() {
+                syncWithFileDialog(dialog)
+                return
+            }
+            clearFileDialogMode()
+            if panel.isVisible {
+                hidePanelAutomatically()
+            }
+            return
+        }
+
         guard shouldUseFinderWindowContext else {
             if !hotKeyRefs.isEmpty {
                 unregisterHotKeys()
@@ -4518,6 +4565,15 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private func syncWithFinder() {
+        if isFileDialogMode {
+            if let dialog = findFrontFileDialog() {
+                syncWithFileDialog(dialog)
+            } else if !isFinderFrontmost {
+                clearFileDialogMode()
+                hidePanelAutomatically()
+            }
+            return
+        }
         if isFreezingDuringFinderMouseDrag || isLiveTrackingFinderGeometry {
             // Live resize/move: keep width/position in sync without AX tree walks.
             updatePanelFrame(lightweight: true)
@@ -4641,6 +4697,11 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         let frontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         // Never walk Finder's AX tree while another app is frontmost — that race
         // matches the SIGSEGV corpses when opening Excel/WPS/PPT from Finder.
+        // File-dialog mode is an intentional exception: we attach above Open/Save.
+        if isFileDialogMode {
+            panel.level = .floating
+            return
+        }
         guard frontmostBundleID == "com.apple.finder" || frontmostBundleID == Bundle.main.bundleIdentifier else {
             panel.level = .normal
             return
@@ -4696,16 +4757,22 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         // Clicking the path bar / bookmarks activates FinderPathBar. Keep the
         // bar up in that case — requiring an attached window ID made it hide
         // as soon as Finder finished (or briefly lost) focus.
+        if isFileDialogMode {
+            return true
+        }
         if isFinderFrontmost || isFinderPathBarFrontmost {
             return true
         }
-        if panel.isVisible, isNavigatingHistory || isEditingPath {
+        if panel.isVisible, isNavigatingHistory || isEditingPath || isNavigatingFileDialog {
             return true
         }
         return false
     }
 
     private func defaultPanelFrame(lightweight: Bool = false) -> NSRect? {
+        if isFileDialogMode {
+            return defaultFileDialogPanelFrame()
+        }
         let now = Date()
         // While Finder is mid-navigation, AX content scans are unreliable and
         // often fall back to the full window (including the sidebar). Prefer the
@@ -6453,6 +6520,436 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             end tell
             """)
         }
+    }
+
+    // MARK: - Open / Save file dialog support
+
+    private struct FileDialogInfo {
+        let app: NSRunningApplication
+        let window: AXUIElement
+        let bounds: NSRect
+    }
+
+    private func clearFileDialogMode() {
+        isFileDialogMode = false
+        attachedFileDialogPID = nil
+        lastFileDialogBounds = nil
+        isNavigatingFileDialog = false
+    }
+
+    private func enterFileDialogMode(_ dialog: FileDialogInfo) {
+        let wasAlready = isFileDialogMode && attachedFileDialogPID == dialog.app.processIdentifier
+        isFileDialogMode = true
+        attachedFileDialogPID = dialog.app.processIdentifier
+        lastFileDialogBounds = dialog.bounds
+        attachedFinderWindowID = nil
+        manuallyHidden = false
+        unregisterHotKeys()
+        stopKeyEventTap()
+        if !wasAlready {
+            AppLogger.shared.log("enterFileDialogMode pid=\(dialog.app.processIdentifier) app=\(dialog.app.bundleIdentifier ?? "?")")
+            if let path = currentFileDialogPath(from: dialog) {
+                applyPathToUI(path)
+                recordHistory(path)
+            }
+        }
+        syncWithFileDialog(dialog)
+    }
+
+    private func syncWithFileDialog(_ dialog: FileDialogInfo) {
+        lastFileDialogBounds = dialog.bounds
+        suppressAutoHide(duration: 0.6)
+        guard !manuallyHidden else { return }
+        if !panel.isVisible {
+            updatePanelFrame()
+            panel.orderFrontRegardless()
+            startFollowingFinder()
+            startMouseMonitor()
+        } else {
+            updatePanelFrame(lightweight: true)
+        }
+        updatePanelLevelForCurrentApp()
+        let now = Date()
+        guard !isEditingPath, !isNavigatingFileDialog,
+              now.timeIntervalSince(lastFileDialogPathSyncAt) >= 0.35 else {
+            return
+        }
+        lastFileDialogPathSyncAt = now
+        if let path = currentFileDialogPath(from: dialog), !path.isEmpty {
+            if path != normalizePath(pathField.stringValue) {
+                applyPathToUI(path)
+            }
+            recordHistory(path)
+        }
+        updateBookmarkButton()
+        updateNavigationButtonStates()
+    }
+
+    private func defaultFileDialogPanelFrame() -> NSRect? {
+        let windowFrame = lastFileDialogBounds
+            ?? findFrontFileDialog()?.bounds
+        guard let windowFrame, windowFrame.width > 40 else { return nil }
+        let height = currentPanelHeight(forWidth: windowFrame.width)
+        return NSRect(
+            x: windowFrame.minX,
+            y: windowFrame.maxY - height,
+            width: windowFrame.width,
+            height: height
+        )
+    }
+
+    private func findFrontFileDialog() -> FileDialogInfo? {
+        guard ensureAccessibilityPermission(prompt: false),
+              let app = NSWorkspace.shared.frontmostApplication,
+              app.bundleIdentifier != "com.apple.finder",
+              app.bundleIdentifier != Bundle.main.bundleIdentifier else {
+            // When FP itself is frontmost (user clicked the bar), keep using the
+            // previously attached dialog host if it still has an open panel.
+            if isFinderPathBarFrontmost, let pid = attachedFileDialogPID,
+               let app = NSRunningApplication(processIdentifier: pid),
+               let dialog = fileDialog(in: app) {
+                return dialog
+            }
+            return nil
+        }
+        return fileDialog(in: app)
+    }
+
+    private func fileDialog(in app: NSRunningApplication) -> FileDialogInfo? {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var candidates: [AXUIElement] = []
+
+        var focusedValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedValue) == .success,
+           let focused = AXSafe.element(focusedValue) {
+            candidates.append(focused)
+            candidates.append(contentsOf: axSheets(in: focused))
+        }
+
+        var windowsValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+           let windows = windowsValue as? [AXUIElement] {
+            for window in windows {
+                candidates.append(window)
+                candidates.append(contentsOf: axSheets(in: window))
+            }
+        }
+
+        var seenHashes = Set<UInt>()
+        for candidate in candidates {
+            let hash = UInt(CFHash(candidate))
+            guard seenHashes.insert(hash).inserted else { continue }
+            guard looksLikeFileDialog(candidate),
+                  let bounds = axWindowRect(candidate),
+                  bounds.width >= 320, bounds.height >= 220 else {
+                continue
+            }
+            return FileDialogInfo(app: app, window: candidate, bounds: bounds)
+        }
+        return nil
+    }
+
+    private func axSheets(in window: AXUIElement) -> [AXUIElement] {
+        var childrenValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXChildrenAttribute as CFString, &childrenValue) == .success,
+              let children = childrenValue as? [AXUIElement] else {
+            return []
+        }
+        return children.filter { element in
+            axRole(element) == "AXSheet" || axSubrole(element) == "AXDialog"
+        }
+    }
+
+    private func looksLikeFileDialog(_ element: AXUIElement) -> Bool {
+        let titles = collectButtonTitles(in: element, limit: 40)
+        guard !titles.isEmpty else { return false }
+        let normalized = titles.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        let hasCancel = normalized.contains { $0 == "cancel" || $0 == "取消" }
+        let hasConfirm = normalized.contains {
+            $0 == "open" || $0 == "打开" || $0 == "save" || $0 == "存储" || $0 == "储存"
+                || $0 == "choose" || $0 == "选择" || $0 == "select" || $0 == "上传"
+                || $0.hasPrefix("open ") || $0.hasPrefix("打开")
+        }
+        guard hasCancel && hasConfirm else { return false }
+        // Prefer dialogs that also look like a browser (list / outline / search).
+        if containsFileBrowserChrome(element) {
+            return true
+        }
+        // Some sandboxed panels expose fewer roles; Cancel+Open is enough.
+        let role = axRole(element)
+        return role == "AXSheet" || role == "AXWindow" || axSubrole(element) == "AXDialog"
+    }
+
+    private func containsFileBrowserChrome(_ element: AXUIElement) -> Bool {
+        var found = false
+        walkAX(element, maxNodes: 80) { child in
+            let role = axRole(child)
+            if role == "AXOutline" || role == "AXTable" || role == "AXBrowser"
+                || role == "AXScrollArea" || role == "AXSplitGroup"
+                || role == "AXSearchField" {
+                found = true
+                return false
+            }
+            return true
+        }
+        return found
+    }
+
+    private func collectButtonTitles(in root: AXUIElement, limit: Int) -> [String] {
+        var titles: [String] = []
+        walkAX(root, maxNodes: 120) { element in
+            if titles.count >= limit { return false }
+            if axRole(element) == "AXButton", let title = axTitle(element), !title.isEmpty {
+                titles.append(title)
+            }
+            return true
+        }
+        return titles
+    }
+
+    private func currentFileDialogPath(from dialog: FileDialogInfo) -> String? {
+        if let document = axStringAttribute(dialog.window, kAXDocumentAttribute as String)
+            ?? axStringAttribute(dialog.window, kAXURLAttribute as String) {
+            let path = normalizePath(document.replacingOccurrences(of: "file://", with: ""))
+            if path.hasPrefix("/"), FileManager.default.fileExists(atPath: path) {
+                return path
+            }
+        }
+        if let path = pathFromAXPathControl(in: dialog.window) {
+            return path
+        }
+        if let path = pathLikeString(in: dialog.window) {
+            return path
+        }
+        // Fall back: keep showing whatever we already have if still valid.
+        let current = normalizePath(pathField.stringValue)
+        if !current.isEmpty, FileManager.default.fileExists(atPath: current) {
+            return current
+        }
+        return nil
+    }
+
+    private func pathFromAXPathControl(in root: AXUIElement) -> String? {
+        var components: [String] = []
+        walkAX(root, maxNodes: 100) { element in
+            let role = axRole(element)
+            if role == "AXPath" || role == "AXList" {
+                // Continue into children for path segments.
+            }
+            if role == "AXButton" || role == "AXStaticText" || role == "AXMenuButton" {
+                if let title = axTitle(element) ?? axStringAttribute(element, kAXValueAttribute as String) {
+                    let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                    // Path controls often use folder names; joining alone is ambiguous.
+                    // Prefer an explicit POSIX path value when present.
+                    if trimmed.hasPrefix("/"), FileManager.default.fileExists(atPath: trimmed) {
+                        components = [trimmed]
+                        return false
+                    }
+                }
+            }
+            if let value = axStringAttribute(element, kAXValueAttribute as String) {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.hasPrefix("/"), FileManager.default.fileExists(atPath: trimmed) {
+                    components = [trimmed]
+                    return false
+                }
+                if trimmed.hasPrefix("~") {
+                    let expanded = (trimmed as NSString).expandingTildeInPath
+                    if FileManager.default.fileExists(atPath: expanded) {
+                        components = [expanded]
+                        return false
+                    }
+                }
+            }
+            return true
+        }
+        guard let only = components.first else { return nil }
+        return normalizePath(only)
+    }
+
+    private func pathLikeString(in root: AXUIElement) -> String? {
+        var best: String?
+        walkAX(root, maxNodes: 100) { element in
+            guard let value = axStringAttribute(element, kAXValueAttribute as String)
+                    ?? axTitle(element) else {
+                return true
+            }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidate: String
+            if trimmed.hasPrefix("~") {
+                candidate = (trimmed as NSString).expandingTildeInPath
+            } else {
+                candidate = trimmed
+            }
+            guard candidate.hasPrefix("/"),
+                  candidate.count > 1,
+                  !candidate.contains("\n"),
+                  FileManager.default.fileExists(atPath: candidate) else {
+                return true
+            }
+            if best == nil || candidate.count > (best?.count ?? 0) {
+                best = candidate
+            }
+            return true
+        }
+        return best.map(normalizePath)
+    }
+
+    private func navigateFileDialog(to rawPath: String, source: String) {
+        let normalizedPath = normalizePath((rawPath as NSString).expandingTildeInPath)
+        AppLogger.shared.log("navigateFileDialog path=\(normalizedPath) source=\(source)")
+        guard !normalizedPath.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        var isDirectory: ObjCBool = false
+        var targetPath = normalizedPath
+        if FileManager.default.fileExists(atPath: normalizedPath, isDirectory: &isDirectory) {
+            if !isDirectory.boolValue {
+                targetPath = URL(fileURLWithPath: normalizedPath).deletingLastPathComponent().path
+            }
+        } else {
+            NSSound.beep()
+            showCloseFailure(localized("Path no longer exists", "路径不存在"))
+            return
+        }
+        targetPath = normalizePath(targetPath)
+
+        guard let dialog = findFrontFileDialog()
+                ?? (attachedFileDialogPID.flatMap { NSRunningApplication(processIdentifier: $0) }.flatMap { fileDialog(in: $0) }) else {
+            NSSound.beep()
+            showCloseFailure(localized("No file dialog", "未找到打开/保存对话框"))
+            clearFileDialogMode()
+            return
+        }
+
+        isNavigatingFileDialog = true
+        suppressAutoHide(duration: 2.5)
+        applyPathToUI(targetPath)
+        dialog.app.activate(options: [.activateIgnoringOtherApps])
+
+        // ⌘⇧G — "Go to the folder" works in almost all NSOpenPanel / NSSavePanel.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            self?.postKeyCombo(keyCode: CGKeyCode(kVK_ANSI_G), flags: [.maskCommand, .maskShift])
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self else { return }
+            if self.fillGoToFolderField(in: dialog.app, path: targetPath) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                    self?.postKeyCombo(keyCode: CGKeyCode(kVK_Return), flags: [])
+                }
+            } else {
+                // Type the path as a fallback when AX set-value fails.
+                self.typeTextViaClipboard(targetPath)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                    self?.postKeyCombo(keyCode: CGKeyCode(kVK_Return), flags: [])
+                }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+            guard let self else { return }
+            self.isNavigatingFileDialog = false
+            self.recordHistory(targetPath)
+            if let refreshed = self.findFrontFileDialog() {
+                self.syncWithFileDialog(refreshed)
+            }
+        }
+    }
+
+    private func fillGoToFolderField(in app: NSRunningApplication, path: String) -> Bool {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var field: AXUIElement?
+        // Prefer the focused sheet / focused UI element.
+        var focusedUI: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedUI) == .success,
+           let focused = AXSafe.element(focusedUI),
+           axRole(focused) == "AXTextField" || axRole(focused) == "AXComboBox" {
+            field = focused
+        }
+        if field == nil, let dialog = fileDialog(in: app) {
+            walkAX(dialog.window, maxNodes: 80) { element in
+                let role = axRole(element)
+                if role == "AXTextField" || role == "AXComboBox" {
+                    field = element
+                    return false
+                }
+                return true
+            }
+        }
+        guard let field else { return false }
+        AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        let setStatus = AXUIElementSetAttributeValue(field, kAXValueAttribute as CFString, path as CFTypeRef)
+        return setStatus == .success
+    }
+
+    private func typeTextViaClipboard(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        let previous = pasteboard.string(forType: .string)
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        postKeyCombo(keyCode: CGKeyCode(kVK_ANSI_A), flags: [.maskCommand])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+            self?.postKeyCombo(keyCode: CGKeyCode(kVK_ANSI_V), flags: [.maskCommand])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                if let previous {
+                    pasteboard.clearContents()
+                    pasteboard.setString(previous, forType: .string)
+                }
+            }
+        }
+    }
+
+    private func postKeyCombo(keyCode: CGKeyCode, flags: CGEventFlags) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
+        down?.flags = flags
+        up?.flags = flags
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+    }
+
+    private func walkAX(_ root: AXUIElement, maxNodes: Int, visit: (AXUIElement) -> Bool) {
+        var queue: [AXUIElement] = [root]
+        var visited = 0
+        while !queue.isEmpty, visited < maxNodes {
+            let element = queue.removeFirst()
+            visited += 1
+            guard visit(element) else { return }
+            var childrenValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue) == .success,
+                  let children = childrenValue as? [AXUIElement] else {
+                continue
+            }
+            queue.append(contentsOf: children)
+        }
+    }
+
+    private func axRole(_ element: AXUIElement) -> String {
+        axStringAttribute(element, kAXRoleAttribute as String) ?? ""
+    }
+
+    private func axSubrole(_ element: AXUIElement) -> String {
+        axStringAttribute(element, kAXSubroleAttribute as String) ?? ""
+    }
+
+    private func axTitle(_ element: AXUIElement) -> String? {
+        axStringAttribute(element, kAXTitleAttribute as String)
+    }
+
+    private func axStringAttribute(_ element: AXUIElement, _ attribute: String) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let value else {
+            return nil
+        }
+        if let string = value as? String {
+            return string
+        }
+        if let url = value as? URL {
+            return url.path
+        }
+        return nil
     }
 
     private func closeFrontFinderWindowWithAccessibility() -> Bool {
