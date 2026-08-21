@@ -177,6 +177,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private var lastFinderWindowBounds: NSRect?
     private var pendingCollapsedSidebarContent: NSRect?
     private var finderWindowUnavailableSince: Date?
+    /// Path bar was ordered out because Finder showed Replace / Get Info / etc.
+    private var hiddenForFinderUtilityDialog = false
     private var lastPathSyncAt = Date.distantPast
     private var lastContentBoundsSyncAt = Date.distantPast
     private var history: [HistoryEntry] = []
@@ -1421,6 +1423,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         defer { isHidingOrDetachingPanel = false }
 
         clearFileDialogMode()
+        hiddenForFinderUtilityDialog = false
         pendingFinderReattachWorkItem?.cancel()
         pendingFinderReattachWorkItem = nil
         stopFollowingFinder()
@@ -3940,6 +3943,14 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         finderWindowUnavailableSince = nil
         guard !manuallyHidden else { return }
 
+        if shouldHidePathBarForFinderDialog() {
+            hidePathBarForFinderUtilityDialog()
+            return
+        }
+        if hiddenForFinderUtilityDialog {
+            hiddenForFinderUtilityDialog = false
+        }
+
         if panel.isVisible {
             syncWithFinder()
         } else {
@@ -4579,6 +4590,17 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             updatePanelFrame(lightweight: true)
             return
         }
+        if shouldHidePathBarForFinderDialog() {
+            hidePathBarForFinderUtilityDialog()
+            return
+        }
+        if hiddenForFinderUtilityDialog {
+            hiddenForFinderUtilityDialog = false
+            if !panel.isVisible, !manuallyHidden {
+                presentPanel(focusAddressBar: false, createFinderWindow: false)
+                return
+            }
+        }
         guard shouldUseFinderWindowContext else {
             hidePanelAutomatically()
             return
@@ -4662,10 +4684,9 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         if isFinderRenameHotKeysSuspended {
             return
         }
-        // Replace / Keep Both sheets also confuse AX bounds; keep geometry stable
-        // and only adjust level so the dialog stays clickable.
-        if isFinderShowingFloatingWindow() {
-            updatePanelLevelForCurrentApp()
+        // Replace / Keep Both / Get Info: temporarily hide so the dialog is clear.
+        if shouldHidePathBarForFinderDialog() {
+            hidePathBarForFinderUtilityDialog()
             return
         }
         guard shouldUseFinderWindowContext else {
@@ -4706,17 +4727,31 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             panel.level = .normal
             return
         }
-        if isFinderShowingFloatingWindow() {
-            // Finder's Get Info and other utility panels must remain usable
-            // above the path bar instead of being covered by it.
-            panel.level = .normal
-            return
-        }
         panel.level = .floating
     }
 
-    private func isFinderShowingFloatingWindow() -> Bool {
-        guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first else {
+    private func hidePathBarForFinderUtilityDialog() {
+        guard !hiddenForFinderUtilityDialog || panel.isVisible else { return }
+        if panel.isVisible {
+            AppLogger.shared.log("hidePathBarForFinderUtilityDialog")
+            hiddenForFinderUtilityDialog = true
+            panel.orderOut(nil)
+            hideHistoryPanel()
+            hideToolbarMenu()
+            hideAutocompletePanel()
+            hideSearchPanel()
+        } else {
+            hiddenForFinderUtilityDialog = true
+        }
+    }
+
+    /// Replace / Keep Both / Stop, Get Info, and similar Finder utility dialogs.
+    private func shouldHidePathBarForFinderDialog() -> Bool {
+        guard isFinderFrontmost || isFinderPathBarFrontmost || hiddenForFinderUtilityDialog else {
+            return false
+        }
+        guard ensureAccessibilityPermission(prompt: false),
+              let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first else {
             return false
         }
         let appElement = AXUIElementCreateApplication(finder.processIdentifier)
@@ -4725,24 +4760,44 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
               let windows = windowsValue as? [AXUIElement] else {
             return false
         }
-        return windows.contains { window in
-            var subroleValue: CFTypeRef?
-            let hasSubrole = AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue) == .success
-            let subrole = hasSubrole ? (subroleValue as? String) : nil
-            if subrole == "AXFloatingWindow" || subrole == "AXDialog" {
+        for window in windows {
+            if isFinderUtilityDialogWindow(window) {
                 return true
             }
-
-            var titleValue: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success,
-                  let title = titleValue as? String else {
-                return false
+            // Conflict prompts are often sheets on the Finder window.
+            for sheet in axSheets(in: window) where isFinderUtilityDialogWindow(sheet) {
+                return true
             }
-            let normalizedTitle = title.lowercased()
-            return title.contains("简介")
-                || normalizedTitle.contains("get info")
-                || normalizedTitle.hasSuffix(" info")
         }
+        var focusedValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedValue) == .success,
+           let focused = AXSafe.element(focusedValue),
+           isFinderUtilityDialogWindow(focused) {
+            return true
+        }
+        return false
+    }
+
+    private func isFinderUtilityDialogWindow(_ window: AXUIElement) -> Bool {
+        let title = (axTitle(window) ?? "").lowercased()
+        if title.contains("简介") || title.contains("get info") || title.hasSuffix(" info") {
+            return true
+        }
+
+        let buttonTitles = collectButtonTitles(in: window, limit: 24)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        let hasReplace = buttonTitles.contains { $0 == "替换" || $0 == "replace" }
+        let hasKeepBoth = buttonTitles.contains { $0 == "保留两者" || $0 == "keep both" }
+        let hasStop = buttonTitles.contains { $0 == "停止" || $0 == "stop" }
+        // Finder copy/move conflict sheet: Replace / Keep Both / Stop
+        if hasReplace || hasKeepBoth || hasStop {
+            return true
+        }
+        return false
+    }
+
+    private func isFinderShowingFloatingWindow() -> Bool {
+        shouldHidePathBarForFinderDialog()
     }
 
     private var isFinderFrontmost: Bool {
