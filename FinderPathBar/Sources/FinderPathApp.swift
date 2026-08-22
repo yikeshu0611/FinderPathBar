@@ -7736,44 +7736,137 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
   <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
   <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
   <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+  <Override PartName="/xl/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
 </Types>
 """#),
             ("_rels/.rels", #"""
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
 </Relationships>
+"""#),
+            ("docProps/core.xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title></dc:title>
+  <dc:creator>FinderPathBar</dc:creator>
+  <cp:lastModifiedBy>FinderPathBar</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">2026-01-01T00:00:00Z</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">2026-01-01T00:00:00Z</dcterms:modified>
+</cp:coreProperties>
+"""#),
+            ("docProps/app.xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>FinderPathBar</Application>
+  <DocSecurity>0</DocSecurity>
+  <ScaleCrop>false</ScaleCrop>
+  <SharedDoc>false</SharedDoc>
+  <HyperlinksChanged>false</HyperlinksChanged>
+  <AppVersion>1.0</AppVersion>
+</Properties>
 """#),
             ("xl/workbook.xml", #"""
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <fileVersion appName="xl"/>
+  <workbookPr/>
+  <bookViews>
+    <workbookView xWindow="0" yWindow="0" windowWidth="24000" windowHeight="15000"/>
+  </bookViews>
   <sheets>
     <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
   </sheets>
+  <calcPr calcId="0"/>
 </workbook>
 """#),
             ("xl/_rels/workbook.xml.rels", #"""
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
 </Relationships>
 """#),
             ("xl/worksheets/sheet1.xml", #"""
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1"/>
+  <sheetViews>
+    <sheetView workbookViewId="0"/>
+  </sheetViews>
+  <sheetFormatPr defaultRowHeight="15"/>
   <sheetData/>
+  <pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>
 </worksheet>
 """#),
             ("xl/styles.xml", #"""
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font></fonts>
+  <fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font></fonts>
   <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
   <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>
+"""#),
+            ("xl/sharedStrings.xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="0" uniqueCount="0"/>
+"""#),
+            ("xl/theme/theme1.xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme">
+  <a:themeElements>
+    <a:clrScheme name="Office">
+      <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+      <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+      <a:dk2><a:srgbClr val="1F497D"/></a:dk2>
+      <a:lt2><a:srgbClr val="EEECE1"/></a:lt2>
+      <a:accent1><a:srgbClr val="4F81BD"/></a:accent1>
+      <a:accent2><a:srgbClr val="C0504D"/></a:accent2>
+      <a:accent3><a:srgbClr val="9BBB59"/></a:accent3>
+      <a:accent4><a:srgbClr val="8064A2"/></a:accent4>
+      <a:accent5><a:srgbClr val="4BACC6"/></a:accent5>
+      <a:accent6><a:srgbClr val="F79646"/></a:accent6>
+      <a:hlink><a:srgbClr val="0000FF"/></a:hlink>
+      <a:folHlink><a:srgbClr val="800080"/></a:folHlink>
+    </a:clrScheme>
+    <a:fontScheme name="Office">
+      <a:majorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>
+      <a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>
+    </a:fontScheme>
+    <a:fmtScheme name="Office">
+      <a:fillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+      </a:fillStyleLst>
+      <a:lnStyleLst>
+        <a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+        <a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+        <a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+      </a:lnStyleLst>
+      <a:effectStyleLst>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+      </a:effectStyleLst>
+      <a:bgFillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+      </a:bgFillStyleLst>
+    </a:fmtScheme>
+  </a:themeElements>
+</a:theme>
 """#)
         ])
     }
