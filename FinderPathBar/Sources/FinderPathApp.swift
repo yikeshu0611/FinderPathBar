@@ -1543,13 +1543,17 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             let createdURL: URL
             if let ext = extensionName {
                 createdURL = uniqueURL(in: directory, baseName: "未命名", extensionName: ext)
-                let contents = defaultFileContents(for: ext, directory: directory)
-                if contents.isEmpty {
-                    guard FileManager.default.createFile(atPath: createdURL.path, contents: Data()) else {
-                        throw CocoaError(.fileWriteUnknown)
-                    }
+                if let binary = defaultBinaryFileContents(for: ext) {
+                    try binary.write(to: createdURL, options: .atomic)
                 } else {
-                    try contents.write(to: createdURL, atomically: false, encoding: .utf8)
+                    let contents = defaultFileContents(for: ext, directory: directory)
+                    if contents.isEmpty {
+                        guard FileManager.default.createFile(atPath: createdURL.path, contents: Data()) else {
+                            throw CocoaError(.fileWriteUnknown)
+                        }
+                    } else {
+                        try contents.write(to: createdURL, atomically: true, encoding: .utf8)
+                    }
                 }
             } else {
                 createdURL = uniqueURL(in: directory, baseName: "未命名文件夹", extensionName: nil)
@@ -7706,6 +7710,284 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         default:
             return ""
         }
+    }
+
+    /// Real Office Open XML packages (zip). Empty `.xlsx` / `.docx` files are not valid.
+    private func defaultBinaryFileContents(for extensionName: String) -> Data? {
+        switch extensionName.lowercased() {
+        case "xlsx":
+            return blankXLSXData()
+        case "docx":
+            return blankDOCXData()
+        case "pptx":
+            return blankPPTXData()
+        default:
+            return nil
+        }
+    }
+
+    private func blankXLSXData() -> Data {
+        zipArchive(entries: [
+            ("[Content_Types].xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>
+"""#),
+            ("_rels/.rels", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>
+"""#),
+            ("xl/workbook.xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>
+"""#),
+            ("xl/_rels/workbook.xml.rels", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>
+"""#),
+            ("xl/worksheets/sheet1.xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData/>
+</worksheet>
+"""#),
+            ("xl/styles.xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font></fonts>
+  <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+</styleSheet>
+"""#)
+        ])
+    }
+
+    private func blankDOCXData() -> Data {
+        zipArchive(entries: [
+            ("[Content_Types].xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>
+"""#),
+            ("_rels/.rels", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>
+"""#),
+            ("word/document.xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t></w:t></w:r></w:p>
+    <w:sectPr/>
+  </w:body>
+</w:document>
+"""#),
+            ("word/_rels/document.xml.rels", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>
+"""#)
+        ])
+    }
+
+    private func blankPPTXData() -> Data {
+        zipArchive(entries: [
+            ("[Content_Types].xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>
+  <Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
+</Types>
+"""#),
+            ("_rels/.rels", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+</Relationships>
+"""#),
+            ("ppt/presentation.xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldIdLst>
+    <p:sldId id="256" r:id="rId1"/>
+  </p:sldIdLst>
+  <p:sldSz cx="12192000" cy="6858000"/>
+</p:presentation>
+"""#),
+            ("ppt/_rels/presentation.xml.rels", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+</Relationships>
+"""#),
+            ("ppt/slides/slide1.xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+</p:sld>
+"""#),
+            ("ppt/slides/_rels/slide1.xml.rels", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>
+"""#),
+            ("ppt/slideLayouts/slideLayout1.xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank">
+  <p:cSld name="Blank"><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+</p:sldLayout>
+"""#),
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+</Relationships>
+"""#),
+            ("ppt/slideMasters/slideMaster1.xml", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:bg/><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+    <p:grpSpPr/>
+  </p:spTree></p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+</p:sldMaster>
+"""#),
+            ("ppt/slideMasters/_rels/slideMaster1.xml.rels", #"""
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>
+"""#)
+        ])
+    }
+
+    /// Minimal ZIP (store-only) writer for Office Open XML packages.
+    private func zipArchive(entries: [(String, String)]) -> Data {
+        var localFiles = Data()
+        var centralDirectory = Data()
+        var offset: UInt32 = 0
+
+        func appendUInt16(_ value: UInt16, to data: inout Data) {
+            var le = value.littleEndian
+            withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+        }
+        func appendUInt32(_ value: UInt32, to data: inout Data) {
+            var le = value.littleEndian
+            withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+        }
+
+        for (path, text) in entries {
+            let nameData = Data(path.utf8)
+            let fileData = Data(text.utf8)
+            let crc = crc32(fileData)
+            let size = UInt32(fileData.count)
+            let nameLength = UInt16(nameData.count)
+            let localHeaderOffset = offset
+
+            var local = Data()
+            appendUInt32(0x04034b50, to: &local) // local file header
+            appendUInt16(20, to: &local) // version needed
+            appendUInt16(0, to: &local) // flags
+            appendUInt16(0, to: &local) // method = store
+            appendUInt16(0, to: &local) // time
+            appendUInt16(0, to: &local) // date
+            appendUInt32(crc, to: &local)
+            appendUInt32(size, to: &local)
+            appendUInt32(size, to: &local)
+            appendUInt16(nameLength, to: &local)
+            appendUInt16(0, to: &local) // extra length
+            local.append(nameData)
+            local.append(fileData)
+            localFiles.append(local)
+
+            var central = Data()
+            appendUInt32(0x02014b50, to: &central) // central directory header
+            appendUInt16(20, to: &central) // version made by
+            appendUInt16(20, to: &central) // version needed
+            appendUInt16(0, to: &central)
+            appendUInt16(0, to: &central)
+            appendUInt16(0, to: &central)
+            appendUInt16(0, to: &central)
+            appendUInt32(crc, to: &central)
+            appendUInt32(size, to: &central)
+            appendUInt32(size, to: &central)
+            appendUInt16(nameLength, to: &central)
+            appendUInt16(0, to: &central)
+            appendUInt16(0, to: &central) // comment
+            appendUInt16(0, to: &central) // disk start
+            appendUInt16(0, to: &central) // internal attrs
+            appendUInt32(0, to: &central) // external attrs
+            appendUInt32(localHeaderOffset, to: &central)
+            central.append(nameData)
+            centralDirectory.append(central)
+
+            offset += UInt32(local.count)
+        }
+
+        let centralSize = UInt32(centralDirectory.count)
+        let centralOffset = offset
+        var end = Data()
+        appendUInt32(0x06054b50, to: &end)
+        appendUInt16(0, to: &end)
+        appendUInt16(0, to: &end)
+        appendUInt16(UInt16(entries.count), to: &end)
+        appendUInt16(UInt16(entries.count), to: &end)
+        appendUInt32(centralSize, to: &end)
+        appendUInt32(centralOffset, to: &end)
+        appendUInt16(0, to: &end)
+
+        var result = Data()
+        result.append(localFiles)
+        result.append(centralDirectory)
+        result.append(end)
+        return result
+    }
+
+    private func crc32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xffff_ffff
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                if crc & 1 != 0 {
+                    crc = (crc >> 1) ^ 0xedb88320
+                } else {
+                    crc >>= 1
+                }
+            }
+        }
+        return crc ^ 0xffff_ffff
     }
 
     private func frontFinderWindowID() -> Int? {
