@@ -1457,9 +1457,10 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             endFolderSearch(collapse: true, updateLayout: false)
         }
 
-        guard !isAutoHideSuppressed else { return }
+        // Switching to Finder must always leave file-dialog mode, even while
+        // auto-hide is suppressed (dialog sync keeps refreshing that suppress).
         if app.bundleIdentifier == "com.apple.finder" {
-            clearFileDialogMode()
+            leaveFileDialogModeForFinder()
             manuallyHidden = false
             pendingFinderReattachWorkItem?.cancel()
             // Delay reattach so document apps finish activating and Finder settles.
@@ -1471,8 +1472,12 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
                 self.autoAttachIfNeeded()
             }
             pendingFinderReattachWorkItem = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
-        } else if app.bundleIdentifier != Bundle.main.bundleIdentifier {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+            return
+        }
+
+        guard !isAutoHideSuppressed else { return }
+        if app.bundleIdentifier != Bundle.main.bundleIdentifier {
             if let dialog = findFrontFileDialog() {
                 AppLogger.shared.log("activeApp fileDialog app=\(app.bundleIdentifier ?? app.localizedName ?? "?")")
                 enterFileDialogMode(dialog)
@@ -3906,16 +3911,15 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         suppressAutoAttachUntil = nil
         guard !isAutoHideSuppressed else { return }
 
-        // Prefer Open/Save dialogs when a non-Finder app is frontmost.
-        if !isFinderFrontmost, let dialog = findFrontFileDialog() {
+        // Finder in front always wins over a leftover Open/Save dialog attachment.
+        if isFinderFrontmost {
+            if isFileDialogMode {
+                leaveFileDialogModeForFinder()
+            }
+        } else if let dialog = findFrontFileDialog() {
             enterFileDialogMode(dialog)
             return
-        }
-        if isFileDialogMode, !isFinderFrontmost {
-            if let dialog = findFrontFileDialog() {
-                syncWithFileDialog(dialog)
-                return
-            }
+        } else if isFileDialogMode {
             clearFileDialogMode()
             if panel.isVisible {
                 hidePanelAutomatically()
@@ -4580,14 +4584,18 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private func syncWithFinder() {
+        // If Finder is frontmost, never keep following a background file dialog.
         if isFileDialogMode {
-            if let dialog = findFrontFileDialog() {
+            if isFinderFrontmost {
+                leaveFileDialogModeForFinder()
+            } else if let dialog = findFrontFileDialog() {
                 syncWithFileDialog(dialog)
-            } else if !isFinderFrontmost {
+                return
+            } else {
                 clearFileDialogMode()
                 hidePanelAutomatically()
+                return
             }
-            return
         }
         if isFreezingDuringFinderMouseDrag || isLiveTrackingFinderGeometry {
             // Live resize/move: keep width/position in sync without AX tree walks.
@@ -6703,7 +6711,24 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         isNavigatingFileDialog = false
     }
 
+    /// Drop Open/Save attachment and allow immediate Finder reattach.
+    private func leaveFileDialogModeForFinder() {
+        guard isFileDialogMode else { return }
+        AppLogger.shared.log("leaveFileDialogModeForFinder")
+        clearFileDialogMode()
+        // Dialog sync repeatedly refreshed suppressAutoHide; clear it so Finder
+        // can take the path bar right away.
+        suppressAutoHideUntil = nil
+        lastFileDialogPathSyncAt = .distantPast
+        lastPathSyncAt = .distantPast
+        lastFinderWindowBounds = nil
+        lastMainContentBounds = nil
+        attachedFinderWindowID = nil
+    }
+
     private func enterFileDialogMode(_ dialog: FileDialogInfo) {
+        // Never steal the bar from Finder while Finder is frontmost.
+        guard !isFinderFrontmost else { return }
         let wasAlready = isFileDialogMode && attachedFileDialogPID == dialog.app.processIdentifier
         isFileDialogMode = true
         attachedFileDialogPID = dialog.app.processIdentifier
@@ -6723,6 +6748,10 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private func syncWithFileDialog(_ dialog: FileDialogInfo) {
+        guard !isFinderFrontmost else {
+            leaveFileDialogModeForFinder()
+            return
+        }
         lastFileDialogBounds = dialog.bounds
         suppressAutoHide(duration: 0.6)
         guard !manuallyHidden else { return }
