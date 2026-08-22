@@ -6558,8 +6558,35 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
 
     private func navigateToHistoryItem(restoring previousHistoryIndex: Int) {
         guard history.indices.contains(historyIndex) else { return }
-        let previousPath = currentFinderPath()
         let path = normalizePath(history[historyIndex].path)
+
+        // Open/Save dialog: stay in the dialog — never activate Finder via setFinderTarget.
+        if isFileDialogMode {
+            let dialogExists = findFrontFileDialog() != nil
+                || (attachedFileDialogPID.flatMap { NSRunningApplication(processIdentifier: $0) }.flatMap { fileDialog(in: $0) } != nil)
+            var isDirectory: ObjCBool = false
+            let pathExists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            guard dialogExists, pathExists else {
+                historyIndex = previousHistoryIndex
+                NSSound.beep()
+                updateNavigationButtonStates()
+                return
+            }
+            isNavigatingHistory = true
+            ignoreNextSyncRecordUntil = Date().addingTimeInterval(0.5)
+            applyPathToUI(path)
+            updateBookmarkButton()
+            navigateFileDialog(to: path, source: "history-nav")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+                guard let self else { return }
+                self.isNavigatingHistory = false
+                self.ignoreNextSyncRecordUntil = Date().addingTimeInterval(0.2)
+                self.updateNavigationButtonStates()
+            }
+            return
+        }
+
+        let previousPath = currentFinderPath()
         isNavigatingHistory = true
         ignoreNextSyncRecordUntil = Date().addingTimeInterval(0.4)
         guard setFinderTarget(URL(fileURLWithPath: path)) else {
