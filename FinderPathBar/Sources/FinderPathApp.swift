@@ -7099,12 +7099,14 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             "navigateFileDialog source=\(source) up=\(plan.upCount) down=\(plan.downNames.count) from=\(fromURL.path) to=\(toURL.path)"
         )
 
-        // Never walk down with ⌘↓ / Open — that confirms the panel and closes it.
-        // Ancestor only → ⌘↑. Any path that needs entering children → one Go-to-Folder jump.
+        // Parent / ancestor: ⌘↑ only (same as the 「上级」 button).
+        // Bookmarks / history / address: ⌘↑ to common ancestor, then enter each
+        // child folder by double-click (never ⌘↓/Open — that closes the panel).
+        // ⌘⇧G only if a down step cannot be verified.
         if plan.downNames.isEmpty, plan.upCount > 0 {
             navigateFileDialogByParentSteps(plan.upCount, targetPath: targetPath, dialog: dialog)
         } else {
-            navigateFileDialogViaGoToFolder(targetPath: targetPath, dialog: dialog)
+            navigateFileDialogRelatively(plan: plan, fromPath: fromURL.path, targetPath: targetPath, dialog: dialog)
         }
     }
 
@@ -7151,6 +7153,344 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         }
     }
 
+    /// Bookmark-style jumps without ⌘⇧G when possible: ups + double-click into folders.
+    private func navigateFileDialogRelatively(
+        plan: FileDialogRelativePlan,
+        fromPath: String,
+        targetPath: String,
+        dialog: FileDialogInfo
+    ) {
+        fileDialogNavigationToken += 1
+        let token = fileDialogNavigationToken
+        isNavigatingFileDialog = true
+        let stepCount = plan.upCount + plan.downNames.count
+        suppressAutoHide(duration: max(1.8, 0.22 * Double(stepCount) + 1.0))
+        applyPathToUI(targetPath)
+        dialog.app.activate(options: [.activateIgnoringOtherApps])
+        focusFileDialogBrowser(in: dialog)
+
+        runFileDialogRelativeStep(
+            plan: plan,
+            targetPath: targetPath,
+            dialog: dialog,
+            token: token,
+            stepIndex: 0,
+            expectedPath: normalizePath(fromPath)
+        )
+    }
+
+    private func runFileDialogRelativeStep(
+        plan: FileDialogRelativePlan,
+        targetPath: String,
+        dialog: FileDialogInfo,
+        token: Int,
+        stepIndex: Int,
+        expectedPath: String
+    ) {
+        guard fileDialogNavigationToken == token else { return }
+
+        if stepIndex < plan.upCount {
+            let liveDialog = latestFileDialog(fallback: dialog) ?? dialog
+            focusFileDialogBrowser(in: liveDialog)
+            postKeyCombo(keyCode: CGKeyCode(kVK_UpArrow), flags: [.maskCommand])
+            let nextExpected = URL(fileURLWithPath: expectedPath, isDirectory: true)
+                .deletingLastPathComponent()
+                .standardizedFileURL.path
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.runFileDialogRelativeStep(
+                    plan: plan,
+                    targetPath: targetPath,
+                    dialog: liveDialog,
+                    token: token,
+                    stepIndex: stepIndex + 1,
+                    expectedPath: self?.normalizePath(nextExpected) ?? nextExpected
+                )
+            }
+            return
+        }
+
+        let downIndex = stepIndex - plan.upCount
+        if downIndex < plan.downNames.count {
+            let name = plan.downNames[downIndex]
+            let liveDialog = latestFileDialog(fallback: dialog) ?? dialog
+            let nextExpected = normalizePath(
+                (expectedPath as NSString).appendingPathComponent(name)
+            )
+
+            // Prefer Places sidebar for well-known destinations (no Open / no GTG).
+            if clickFileDialogSidebarItem(named: name, in: liveDialog) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+                    guard let self, self.fileDialogNavigationToken == token else { return }
+                    self.verifyOrContinueFileDialogDown(
+                        plan: plan,
+                        targetPath: targetPath,
+                        dialog: liveDialog,
+                        token: token,
+                        stepIndex: stepIndex + 1,
+                        expectedPath: nextExpected
+                    )
+                }
+                return
+            }
+
+            focusFileDialogBrowser(in: liveDialog)
+            let entered = enterFileDialogChildFolder(named: name, parentPath: expectedPath, in: liveDialog)
+            if !entered {
+                AppLogger.shared.log("relative down missing folder=\(name); fallback GoToFolder")
+                navigateFileDialogViaGoToFolder(targetPath: targetPath, dialog: liveDialog)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self, self.fileDialogNavigationToken == token else { return }
+                self.verifyOrContinueFileDialogDown(
+                    plan: plan,
+                    targetPath: targetPath,
+                    dialog: liveDialog,
+                    token: token,
+                    stepIndex: stepIndex + 1,
+                    expectedPath: nextExpected
+                )
+            }
+            return
+        }
+
+        finishFileDialogNavigation(to: targetPath)
+    }
+
+    private func verifyOrContinueFileDialogDown(
+        plan: FileDialogRelativePlan,
+        targetPath: String,
+        dialog: FileDialogInfo,
+        token: Int,
+        stepIndex: Int,
+        expectedPath: String
+    ) {
+        guard fileDialogNavigationToken == token else { return }
+        let liveDialog = latestFileDialog(fallback: dialog) ?? dialog
+        let live = currentFileDialogPath(from: liveDialog).map(normalizePath)
+        let expected = normalizePath(expectedPath)
+        if let live, live != expected {
+            // Allow brief lag: if still under expected parent, wait once more.
+            let parent = URL(fileURLWithPath: expected, isDirectory: true)
+                .deletingLastPathComponent().path
+            if normalizePath(live) == normalizePath(parent) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    guard let self, self.fileDialogNavigationToken == token else { return }
+                    let again = self.currentFileDialogPath(from: self.latestFileDialog(fallback: liveDialog) ?? liveDialog)
+                        .map(self.normalizePath)
+                    if again == expected {
+                        self.runFileDialogRelativeStep(
+                            plan: plan,
+                            targetPath: targetPath,
+                            dialog: liveDialog,
+                            token: token,
+                            stepIndex: stepIndex,
+                            expectedPath: expected
+                        )
+                    } else {
+                        AppLogger.shared.log("relative verify failed live=\(again ?? "nil") expected=\(expected); GoToFolder")
+                        self.navigateFileDialogViaGoToFolder(targetPath: targetPath, dialog: liveDialog)
+                    }
+                }
+                return
+            }
+            AppLogger.shared.log("relative verify failed live=\(live) expected=\(expected); GoToFolder")
+            navigateFileDialogViaGoToFolder(targetPath: targetPath, dialog: liveDialog)
+            return
+        }
+        runFileDialogRelativeStep(
+            plan: plan,
+            targetPath: targetPath,
+            dialog: liveDialog,
+            token: token,
+            stepIndex: stepIndex,
+            expectedPath: expected
+        )
+    }
+
+    /// Enter a child folder via select + double-click (not ⌘↓/Open).
+    @discardableResult
+    private func enterFileDialogChildFolder(named name: String, parentPath: String, in dialog: FileDialogInfo) -> Bool {
+        let aliases = fileDialogNameAliases(posixName: name, parentPath: parentPath)
+        guard let row = findFileDialogRow(namedAnyOf: aliases, in: dialog.window) else {
+            AppLogger.shared.log("enterFileDialogChildFolder no row name=\(name)")
+            return false
+        }
+
+        AXUIElementSetAttributeValue(row, kAXSelectedAttribute as CFString, kCFBooleanTrue)
+        if let parentOutline = axParentMatching(row, roles: ["AXOutline", "AXTable", "AXList", "AXBrowser"]) {
+            AXUIElementSetAttributeValue(parentOutline, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            let selected = [row] as CFArray
+            AXUIElementSetAttributeValue(parentOutline, kAXSelectedRowsAttribute as CFString, selected)
+            AXUIElementSetAttributeValue(parentOutline, kAXSelectedChildrenAttribute as CFString, selected)
+        }
+
+        // Double-click enters a folder in Open/Save panels without confirming Open.
+        if doubleClickAXElement(row) {
+            return true
+        }
+        // Column view: Right Arrow drills into the selected folder.
+        postKeyCombo(keyCode: CGKeyCode(kVK_RightArrow), flags: [])
+        return true
+    }
+
+    private func fileDialogNameAliases(posixName: String, parentPath: String) -> [String] {
+        var names: [String] = []
+        let trimmed = posixName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { names.append(trimmed) }
+        let full = (parentPath as NSString).appendingPathComponent(posixName)
+        let display = FileManager.default.displayName(atPath: full)
+        if !display.isEmpty, !names.contains(where: { $0.caseInsensitiveCompare(display) == .orderedSame }) {
+            names.append(display)
+        }
+        return names
+    }
+
+    @discardableResult
+    private func clickFileDialogSidebarItem(named name: String, in dialog: FileDialogInfo) -> Bool {
+        let aliases = fileDialogNameAliases(posixName: name, parentPath: "/")
+        let placeHints: Set<String> = [
+            "desktop", "documents", "downloads", "movies", "music", "pictures",
+            "applications", "utilities", "home", "icloud drive", "icloud",
+            "airdrop", "recents", "recent", "shared", "network", "volumes",
+            "macintosh hd", "users",
+            "桌面", "文稿", "下载", "影片", "音乐", "图片", "应用程序", "实用工具",
+            "个人收藏", "最近使用", "最近项目", "iCloud 云盘"
+        ]
+        let isLikelyPlace = aliases.contains { placeHints.contains($0.lowercased()) }
+            || aliases.contains { placeHints.contains($0) }
+        guard isLikelyPlace else { return false }
+
+        var match: AXUIElement?
+        walkAX(dialog.window, maxNodes: 220) { element in
+            let role = axRole(element)
+            guard role == "AXStaticText" || role == "AXButton" || role == "AXCell" || role == "AXRow" else {
+                return true
+            }
+            guard let title = fileDialogElementTitle(element) else { return true }
+            guard aliases.contains(where: { title.caseInsensitiveCompare($0) == .orderedSame }) else {
+                return true
+            }
+            if let frame = axWindowRect(element), frame.minX < 220, frame.width < 280 {
+                match = element
+                return false
+            }
+            if match == nil { match = element }
+            return true
+        }
+        guard let match else { return false }
+        let pressTarget = axParentMatching(match, roles: ["AXRow", "AXButton", "AXCell"]) ?? match
+        let ok = AXUIElementPerformAction(pressTarget, kAXPressAction as CFString) == .success
+        AppLogger.shared.log("clickFileDialogSidebarItem name=\(name) ok=\(ok)")
+        return ok
+    }
+
+    private func findFileDialogRow(namedAnyOf names: [String], in root: AXUIElement) -> AXUIElement? {
+        let wanted = names
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !wanted.isEmpty else { return nil }
+
+        var listRoots: [AXUIElement] = []
+        walkAX(root, maxNodes: 160) { element in
+            let role = axRole(element)
+            if role == "AXOutline" || role == "AXBrowser" || role == "AXTable" {
+                if let frame = axWindowRect(element), frame.width >= 200 {
+                    listRoots.append(element)
+                }
+            }
+            return true
+        }
+        let searchRoots = listRoots.isEmpty ? [root] : listRoots
+
+        for searchRoot in searchRoots {
+            var match: AXUIElement?
+            walkAX(searchRoot, maxNodes: 280) { element in
+                let role = axRole(element)
+                if role == "AXRow" {
+                    if let title = fileDialogElementTitle(element),
+                       wanted.contains(where: { title.caseInsensitiveCompare($0) == .orderedSame }) {
+                        match = element
+                        return false
+                    }
+                }
+                if role == "AXStaticText" || role == "AXCell" {
+                    if let title = fileDialogElementTitle(element),
+                       wanted.contains(where: { title.caseInsensitiveCompare($0) == .orderedSame }) {
+                        match = axParentMatching(element, roles: ["AXRow"]) ?? element
+                        return false
+                    }
+                }
+                return true
+            }
+            if let match { return match }
+        }
+        return nil
+    }
+
+    private func fileDialogElementTitle(_ element: AXUIElement) -> String? {
+        if let title = axTitle(element)?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            return title
+        }
+        if let value = axStringAttribute(element, kAXValueAttribute as String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !value.isEmpty {
+            return value
+        }
+        var childrenValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue) == .success,
+              let children = childrenValue as? [AXUIElement] else {
+            return nil
+        }
+        for child in children {
+            if let title = fileDialogElementTitle(child), !title.isEmpty {
+                return title
+            }
+        }
+        return nil
+    }
+
+    private func axParentMatching(_ element: AXUIElement, roles: [String]) -> AXUIElement? {
+        var current: AXUIElement? = element
+        for _ in 0..<10 {
+            guard let node = current else { return nil }
+            if roles.contains(axRole(node)) {
+                return node
+            }
+            var parentValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(node, kAXParentAttribute as CFString, &parentValue) == .success,
+                  let parent = AXSafe.element(parentValue) else {
+                return nil
+            }
+            current = parent
+        }
+        return nil
+    }
+
+    @discardableResult
+    private func doubleClickAXElement(_ element: AXUIElement) -> Bool {
+        guard let quartz = axElementScreenRect(element) else { return false }
+        let point = CGPoint(x: quartz.midX, y: quartz.midY)
+        guard let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left),
+              let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
+              let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left) else {
+            return false
+        }
+        move.post(tap: .cghidEventTap)
+        down.setIntegerValueField(.mouseEventClickState, value: 1)
+        up.setIntegerValueField(.mouseEventClickState, value: 1)
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        if let down2 = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
+           let up2 = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left) {
+            down2.setIntegerValueField(.mouseEventClickState, value: 2)
+            up2.setIntegerValueField(.mouseEventClickState, value: 2)
+            down2.post(tap: .cghidEventTap)
+            up2.post(tap: .cghidEventTap)
+        }
+        return true
+    }
+
     private func latestFileDialog(fallback: FileDialogInfo) -> FileDialogInfo? {
         findFrontFileDialog()
             ?? (attachedFileDialogPID.flatMap { NSRunningApplication(processIdentifier: $0) }.flatMap { fileDialog(in: $0) })
@@ -7166,7 +7506,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         }
     }
 
-    /// Jump via ⌘⇧G once. Move the sheet off-screen; confirm with the Go button (not bare Return/Open).
+    /// Fallback only: ⌘⇧G once. Move the sheet off-screen; confirm with the Go button (not bare Return/Open).
     private func navigateFileDialogViaGoToFolder(targetPath: String, dialog: FileDialogInfo) {
         AppLogger.shared.log("navigateFileDialogViaGoToFolder path=\(targetPath)")
         fileDialogNavigationToken += 1
