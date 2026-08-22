@@ -5599,68 +5599,175 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             setUpdateStatus(localized("Checking for updates…", "正在检查更新…"))
         }
 
-        let apiURL = URL(string: "https://api.github.com/repos/yikeshu0611/FinderPathBar/releases/latest")!
-        var request = URLRequest(url: apiURL, timeoutInterval: 20)
-        request.setValue("FinderPathBar-Updater", forHTTPHeaderField: "User-Agent")
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        fetchLatestReleaseInfo { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 defer { self.isCheckingForUpdates = false }
 
-                if let error {
+                switch result {
+                case .failure(let error):
                     AppLogger.shared.log("update check failed: \(error.localizedDescription)")
                     if interactive {
                         self.setUpdateStatus(self.localized("Check failed", "检查失败"))
-                        self.showCloseFailure(self.localized("Couldn't check for updates", "无法检查更新（请检查网络）"))
+                        self.showCloseFailure(self.localized(
+                            "Couldn't check for updates: \(error.localizedDescription)",
+                            "无法检查更新：\(error.localizedDescription)"
+                        ))
                     }
-                    return
-                }
-                let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-                guard status == 200, let data else {
-                    AppLogger.shared.log("update check HTTP \(status)")
-                    if interactive {
-                        self.setUpdateStatus(self.localized("Check failed", "检查失败"))
-                        self.showCloseFailure(self.localized("Couldn't check for updates", "无法检查更新"))
+                case .success(let release):
+                    self.lastAppUpdateCheckAt = Date()
+                    let remoteVersion = release.version
+                    let localVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+                    AppLogger.shared.log("update check local=\(localVersion) remote=\(remoteVersion) source=\(release.source)")
+
+                    guard self.compareVersion(remoteVersion, greaterThan: localVersion) else {
+                        if interactive {
+                            self.setUpdateStatus(self.localized("Up to date (\(localVersion))", "已是最新版本（\(localVersion)）"))
+                            self.showCloseFailure(self.localized("Already the latest version", "已是最新版本"))
+                        }
+                        return
                     }
-                    return
-                }
 
-                // Successful network check counts toward the monthly cadence.
-                self.lastAppUpdateCheckAt = Date()
-
-                guard let release = try? JSONDecoder().decode(GitHubReleaseInfo.self, from: data) else {
-                    if interactive {
-                        self.setUpdateStatus(self.localized("Check failed", "检查失败"))
+                    guard let downloadURL = release.downloadURL else {
+                        if interactive {
+                            self.setUpdateStatus(self.localized("No DMG in release", "新版本没有 DMG"))
+                        }
+                        return
                     }
-                    return
+
+                    self.setUpdateStatus(self.localized("Update \(remoteVersion) available", "发现新版本 \(remoteVersion)"))
+                    self.promptToInstallUpdate(version: remoteVersion, downloadURL: downloadURL)
                 }
-
-                let remoteVersion = release.tag_name.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
-                let localVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
-                AppLogger.shared.log("update check local=\(localVersion) remote=\(remoteVersion)")
-
-                guard self.compareVersion(remoteVersion, greaterThan: localVersion) else {
-                    if interactive {
-                        self.setUpdateStatus(self.localized("Up to date (\(localVersion))", "已是最新版本（\(localVersion)）"))
-                        self.showCloseFailure(self.localized("Already the latest version", "已是最新版本"))
-                    }
-                    return
-                }
-
-                guard let asset = release.assets.first(where: { $0.name.lowercased().hasSuffix(".dmg") }),
-                      let downloadURL = URL(string: asset.browser_download_url) else {
-                    if interactive {
-                        self.setUpdateStatus(self.localized("No DMG in release", "新版本没有 DMG"))
-                    }
-                    return
-                }
-
-                self.setUpdateStatus(self.localized("Update \(remoteVersion) available", "发现新版本 \(remoteVersion)"))
-                self.promptToInstallUpdate(version: remoteVersion, downloadURL: downloadURL)
             }
+        }
+    }
+
+    private struct LatestReleaseInfo {
+        let version: String
+        let downloadURL: URL?
+        let source: String
+    }
+
+    private func fetchLatestReleaseInfo(completion: @escaping (Result<LatestReleaseInfo, Error>) -> Void) {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 20
+        config.timeoutIntervalForResource = 30
+        config.httpAdditionalHeaders = [
+            "User-Agent": "FinderPathBar/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0") (macOS)",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28"
+        ]
+        let session = URLSession(configuration: config)
+
+        func fail(_ message: String, code: Int = -1) -> Error {
+            NSError(domain: "FinderPathBar.Update", code: code, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+
+        // 1) GitHub API (ephemeral session avoids shared-cookie 403s).
+        let apiURL = URL(string: "https://api.github.com/repos/yikeshu0611/FinderPathBar/releases/latest")!
+        session.dataTask(with: apiURL) { data, response, error in
+            if let release = self.decodeGitHubAPIRelease(data: data, response: response) {
+                completion(.success(release))
+                return
+            }
+            let apiStatus = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let apiError = error?.localizedDescription ?? "HTTP \(apiStatus)"
+            AppLogger.shared.log("update API failed: \(apiError); trying HTML redirect fallback")
+
+            // 2) Fallback: /releases/latest follows to .../tag/vX.Y.Z (no API quota).
+            var latestRequest = URLRequest(url: URL(string: "https://github.com/yikeshu0611/FinderPathBar/releases/latest")!)
+            latestRequest.httpMethod = "GET"
+            latestRequest.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
+            latestRequest.setValue(
+                "FinderPathBar/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0") (macOS)",
+                forHTTPHeaderField: "User-Agent"
+            )
+            session.dataTask(with: latestRequest) { _, response, redirectError in
+                if let version = self.versionFromGitHubLatestResponse(response),
+                   let info = self.releaseInfo(version: version, source: "html-redirect") {
+                    completion(.success(info))
+                    return
+                }
+
+                AppLogger.shared.log("update HTML redirect failed: \(redirectError?.localizedDescription ?? "no location"); trying atom feed")
+
+                // 3) Fallback: Atom feed.
+                var atomRequest = URLRequest(url: URL(string: "https://github.com/yikeshu0611/FinderPathBar/releases.atom")!)
+                atomRequest.setValue(
+                    "FinderPathBar/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0") (macOS)",
+                    forHTTPHeaderField: "User-Agent"
+                )
+                session.dataTask(with: atomRequest) { atomData, atomResponse, atomError in
+                    if let version = self.versionFromAtomFeed(atomData),
+                       let info = self.releaseInfo(version: version, source: "atom") {
+                        completion(.success(info))
+                        return
+                    }
+                    let atomStatus = (atomResponse as? HTTPURLResponse)?.statusCode ?? -1
+                    let detail = atomError?.localizedDescription
+                        ?? "API \(apiStatus); HTML failed; Atom HTTP \(atomStatus)"
+                    completion(.failure(fail(detail, code: apiStatus)))
+                }.resume()
+            }.resume()
         }.resume()
+    }
+
+    private func decodeGitHubAPIRelease(data: Data?, response: URLResponse?) -> LatestReleaseInfo? {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard status == 200, let data,
+              let release = try? JSONDecoder().decode(GitHubReleaseInfo.self, from: data) else {
+            if let data, let body = String(data: data, encoding: .utf8), !body.isEmpty {
+                AppLogger.shared.log("update API body: \(body.prefix(240))")
+            }
+            return nil
+        }
+        let version = release.tag_name.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        let assetURL = release.assets
+            .first(where: { $0.name.lowercased().hasSuffix(".dmg") })
+            .flatMap { URL(string: $0.browser_download_url) }
+            ?? URL(string: "https://github.com/yikeshu0611/FinderPathBar/releases/download/v\(version)/FinderPathBar-\(version).dmg")
+        return LatestReleaseInfo(version: version, downloadURL: assetURL, source: "api")
+    }
+
+    private func versionFromGitHubLatestResponse(_ response: URLResponse?) -> String? {
+        guard let http = response as? HTTPURLResponse else { return nil }
+        let location = http.value(forHTTPHeaderField: "Location")
+            ?? http.url?.absoluteString
+        guard let location,
+              let range = location.range(of: "/tag/", options: .backwards) else {
+            return nil
+        }
+        let tag = String(location[range.upperBound...])
+            .split(separator: "/").first
+            .map(String.init) ?? ""
+        let version = tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        return version.isEmpty ? nil : version
+    }
+
+    private func versionFromAtomFeed(_ data: Data?) -> String? {
+        guard let data, let xml = String(data: data, encoding: .utf8) else { return nil }
+        // <id>tag:github.com,2008:Repository/…/releases/1.0.94</id> or link …/tag/v1.0.94
+        if let tagRange = xml.range(of: "/tag/v") ?? xml.range(of: "/tag/") {
+            let after = xml[tagRange.upperBound...]
+            let tag = after.prefix(while: { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" })
+            let version = String(tag).trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+            if !version.isEmpty { return version }
+        }
+        if let releaseRange = xml.range(of: "/releases/") {
+            let after = xml[releaseRange.upperBound...]
+            let token = after.prefix(while: { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" })
+            let version = String(token).trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+            if compareVersion(version, greaterThan: "0") || version.contains(".") {
+                return version
+            }
+        }
+        return nil
+    }
+
+    private func releaseInfo(version: String, source: String) -> LatestReleaseInfo? {
+        guard !version.isEmpty else { return nil }
+        let url = URL(string: "https://github.com/yikeshu0611/FinderPathBar/releases/download/v\(version)/FinderPathBar-\(version).dmg")
+        return LatestReleaseInfo(version: version, downloadURL: url, source: source)
     }
 
     private func promptToInstallUpdate(version: String, downloadURL: URL) {
