@@ -3171,7 +3171,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             return
         }
         if isFileDialogMode {
-            navigateFileDialog(to: parentURL.path, source: "parent")
+            navigateFileDialogToParent(from: currentURL, to: parentURL)
             return
         }
         let pathToSelect = currentURL
@@ -6992,6 +6992,56 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         return best.map(normalizePath)
     }
 
+    /// Parent folder in Open/Save panels: use ⌘↑ (no "Go to the folder" sheet).
+    private func navigateFileDialogToParent(from currentURL: URL, to parentURL: URL) {
+        AppLogger.shared.log("navigateFileDialogToParent from=\(currentURL.path) to=\(parentURL.path)")
+        guard let dialog = findFrontFileDialog()
+                ?? (attachedFileDialogPID.flatMap { NSRunningApplication(processIdentifier: $0) }.flatMap { fileDialog(in: $0) }) else {
+            NSSound.beep()
+            showCloseFailure(localized("No file dialog", "未找到打开/保存对话框"))
+            clearFileDialogMode()
+            return
+        }
+
+        isNavigatingFileDialog = true
+        suppressAutoHide(duration: 1.5)
+        applyPathToUI(parentURL.path)
+        dialog.app.activate(options: [.activateIgnoringOtherApps])
+        focusFileDialogBrowser(in: dialog)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+            // Same shortcut Finder / NSOpenPanel use for "Enclosing Folder".
+            self?.postKeyCombo(keyCode: CGKeyCode(kVK_UpArrow), flags: [.maskCommand])
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self else { return }
+            self.isNavigatingFileDialog = false
+            self.recordHistory(parentURL.path)
+            if let refreshed = self.findFrontFileDialog() {
+                self.syncWithFileDialog(refreshed)
+            } else {
+                self.applyPathToUI(parentURL.path)
+            }
+        }
+    }
+
+    private func focusFileDialogBrowser(in dialog: FileDialogInfo) {
+        var browser: AXUIElement?
+        walkAX(dialog.window, maxNodes: 100) { element in
+            let role = axRole(element)
+            if role == "AXOutline" || role == "AXBrowser" || role == "AXTable" || role == "AXScrollArea" {
+                browser = element
+                return false
+            }
+            return true
+        }
+        if let browser {
+            AXUIElementSetAttributeValue(browser, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            AXUIElementPerformAction(browser, kAXRaiseAction as CFString)
+        }
+        AXUIElementSetAttributeValue(dialog.window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    }
+
     private func navigateFileDialog(to rawPath: String, source: String) {
         let normalizedPath = normalizePath((rawPath as NSString).expandingTildeInPath)
         AppLogger.shared.log("navigateFileDialog path=\(normalizedPath) source=\(source)")
@@ -7012,6 +7062,17 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         }
         targetPath = normalizePath(targetPath)
 
+        // One level up → same as the ^ button (⌘↑), avoid Go-to-Folder flash.
+        let current = normalizePath(pathField.stringValue)
+        if !current.isEmpty {
+            let currentURL = URL(fileURLWithPath: current, isDirectory: true).standardizedFileURL
+            let parentPath = normalizePath(currentURL.deletingLastPathComponent().path)
+            if parentPath == targetPath {
+                navigateFileDialogToParent(from: currentURL, to: URL(fileURLWithPath: targetPath, isDirectory: true))
+                return
+            }
+        }
+
         guard let dialog = findFrontFileDialog()
                 ?? (attachedFileDialogPID.flatMap { NSRunningApplication(processIdentifier: $0) }.flatMap { fileDialog(in: $0) }) else {
             NSSound.beep()
@@ -7024,26 +7085,26 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         suppressAutoHide(duration: 2.5)
         applyPathToUI(targetPath)
         dialog.app.activate(options: [.activateIgnoringOtherApps])
+        focusFileDialogBrowser(in: dialog)
 
-        // ⌘⇧G — "Go to the folder" works in almost all NSOpenPanel / NSSavePanel.
+        // ⌘⇧G — only for arbitrary paths (address bar / bookmarks).
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
             self?.postKeyCombo(keyCode: CGKeyCode(kVK_ANSI_G), flags: [.maskCommand, .maskShift])
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) { [weak self] in
             guard let self else { return }
             if self.fillGoToFolderField(in: dialog.app, path: targetPath) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
                     self?.postKeyCombo(keyCode: CGKeyCode(kVK_Return), flags: [])
                 }
             } else {
-                // Type the path as a fallback when AX set-value fails.
                 self.typeTextViaClipboard(targetPath)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                     self?.postKeyCombo(keyCode: CGKeyCode(kVK_Return), flags: [])
                 }
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
             guard let self else { return }
             self.isNavigatingFileDialog = false
             self.recordHistory(targetPath)
