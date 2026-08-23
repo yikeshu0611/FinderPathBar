@@ -1580,6 +1580,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
                 }
             } else {
                 selectCreatedFinderItem(createdURL)
+                beginRenameAfterCreatingItem()
             }
             return createdURL
         } catch {
@@ -2188,6 +2189,16 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         end tell
         """)
         suspendHotKeysUntilFinderRenameEnds()
+    }
+
+    /// After single-click create: wait for selection to stick, then Enter → inline rename.
+    private func beginRenameAfterCreatingItem() {
+        guard !isFileDialogMode else { return }
+        isFinderRenameHotKeysSuspended = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.52) { [weak self] in
+            guard let self else { return }
+            self.enterFinderRenameModeWithoutSelectionReset()
+        }
     }
 
     private func enterFinderRenameModeWithoutSelectionReset() {
