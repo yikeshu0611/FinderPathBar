@@ -121,6 +121,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     /// Wait until FinderPathBar panel is visible before first tip popup.
     private var donationAwaitingFPPanel = false
     private var isCheckingForUpdates = false
+    private var lastInteractiveUpdateCheckAt: Date?
     private weak var settingsUpdateStatusLabel: NSTextField?
     private weak var settingsUpdateProgress: NSProgressIndicator?
     private var updateProgressPanel: NSPanel?
@@ -5617,8 +5618,14 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             }
             return
         }
+        if interactive, let last = lastInteractiveUpdateCheckAt,
+           Date().timeIntervalSince(last) < 2.0 {
+            setUpdateStatus(localized("Checking…", "正在检查…"))
+            return
+        }
         isCheckingForUpdates = true
         if interactive {
+            lastInteractiveUpdateCheckAt = Date()
             setUpdateStatus(localized("Checking for updates…", "正在检查更新…"))
         }
 
@@ -5672,11 +5679,21 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private func fetchLatestReleaseInfo(completion: @escaping (Result<LatestReleaseInfo, Error>) -> Void) {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 20
-        config.timeoutIntervalForResource = 30
+        attemptFetchLatestReleaseInfo(attempt: 0, useSystemSession: false, completion: completion)
+    }
+
+    private func attemptFetchLatestReleaseInfo(
+        attempt: Int,
+        useSystemSession: Bool,
+        completion: @escaping (Result<LatestReleaseInfo, Error>) -> Void
+    ) {
+        let userAgent = "FinderPathBar/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0") (macOS)"
+        let config: URLSessionConfiguration = useSystemSession ? .default : .ephemeral
+        config.timeoutIntervalForRequest = 25
+        config.timeoutIntervalForResource = 45
+        config.waitsForConnectivity = true
         config.httpAdditionalHeaders = [
-            "User-Agent": "FinderPathBar/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0") (macOS)",
+            "User-Agent": userAgent,
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28"
         ]
@@ -5686,53 +5703,118 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             NSError(domain: "FinderPathBar.Update", code: code, userInfo: [NSLocalizedDescriptionKey: message])
         }
 
-        // 1) GitHub API (ephemeral session avoids shared-cookie 403s).
+        func finish(_ result: Result<LatestReleaseInfo, Error>) {
+            switch result {
+            case .success:
+                completion(result)
+            case .failure(let error):
+                let maxAttempts = 3
+                if attempt + 1 < maxAttempts {
+                    let delay = 1.2 * Double(attempt + 1)
+                    AppLogger.shared.log("update check retry \(attempt + 2)/\(maxAttempts) in \(delay)s err=\(error.localizedDescription)")
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+                        self.attemptFetchLatestReleaseInfo(
+                            attempt: attempt + 1,
+                            useSystemSession: useSystemSession,
+                            completion: completion
+                        )
+                    }
+                    return
+                }
+                if !useSystemSession {
+                    AppLogger.shared.log("update check switching to system URLSession")
+                    self.attemptFetchLatestReleaseInfo(attempt: 0, useSystemSession: true, completion: completion)
+                    return
+                }
+                completion(.failure(error))
+            }
+        }
+
+        // 1) GitHub API
         let apiURL = URL(string: "https://api.github.com/repos/yikeshu0611/FinderPathBar/releases/latest")!
         session.dataTask(with: apiURL) { data, response, error in
             if let release = self.decodeGitHubAPIRelease(data: data, response: response) {
-                completion(.success(release))
+                finish(.success(release))
                 return
             }
             let apiStatus = (response as? HTTPURLResponse)?.statusCode ?? -1
-            let apiError = error?.localizedDescription ?? "HTTP \(apiStatus)"
+            let apiError = self.describeURLSessionError(error, response: response, fallback: "HTTP \(apiStatus)")
             AppLogger.shared.log("update API failed: \(apiError); trying HTML redirect fallback")
 
-            // 2) Fallback: /releases/latest follows to .../tag/vX.Y.Z (no API quota).
+            // 2) /releases/latest redirect target
             var latestRequest = URLRequest(url: URL(string: "https://github.com/yikeshu0611/FinderPathBar/releases/latest")!)
             latestRequest.httpMethod = "GET"
             latestRequest.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
-            latestRequest.setValue(
-                "FinderPathBar/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0") (macOS)",
-                forHTTPHeaderField: "User-Agent"
-            )
+            latestRequest.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             session.dataTask(with: latestRequest) { _, response, redirectError in
                 if let version = self.versionFromGitHubLatestResponse(response),
                    let info = self.releaseInfo(version: version, source: "html-redirect") {
-                    completion(.success(info))
+                    finish(.success(info))
                     return
                 }
 
-                AppLogger.shared.log("update HTML redirect failed: \(redirectError?.localizedDescription ?? "no location"); trying atom feed")
+                let redirectDetail = self.describeURLSessionError(redirectError, response: response, fallback: "no location")
+                AppLogger.shared.log("update HTML redirect failed: \(redirectDetail); trying atom feed")
 
-                // 3) Fallback: Atom feed.
+                // 3) Atom feed
                 var atomRequest = URLRequest(url: URL(string: "https://github.com/yikeshu0611/FinderPathBar/releases.atom")!)
-                atomRequest.setValue(
-                    "FinderPathBar/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0") (macOS)",
-                    forHTTPHeaderField: "User-Agent"
-                )
+                atomRequest.setValue(userAgent, forHTTPHeaderField: "User-Agent")
                 session.dataTask(with: atomRequest) { atomData, atomResponse, atomError in
                     if let version = self.versionFromAtomFeed(atomData),
                        let info = self.releaseInfo(version: version, source: "atom") {
-                        completion(.success(info))
+                        finish(.success(info))
                         return
                     }
+
                     let atomStatus = (atomResponse as? HTTPURLResponse)?.statusCode ?? -1
-                    let detail = atomError?.localizedDescription
-                        ?? "API \(apiStatus); HTML failed; Atom HTTP \(atomStatus)"
-                    completion(.failure(fail(detail, code: apiStatus)))
+                    let atomDetail = self.describeURLSessionError(atomError, response: atomResponse, fallback: "HTTP \(atomStatus)")
+                    AppLogger.shared.log("update atom failed: \(atomDetail); trying releases HTML")
+
+                    // 4) Releases index HTML (no API / redirect needed)
+                    var releasesRequest = URLRequest(
+                        url: URL(string: "https://github.com/yikeshu0611/FinderPathBar/releases")!
+                    )
+                    releasesRequest.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                    session.dataTask(with: releasesRequest) { htmlData, htmlResponse, htmlError in
+                        if let version = self.versionFromReleasesHTML(htmlData),
+                           let info = self.releaseInfo(version: version, source: "releases-html") {
+                            finish(.success(info))
+                            return
+                        }
+                        let htmlStatus = (htmlResponse as? HTTPURLResponse)?.statusCode ?? -1
+                        let detail = self.describeURLSessionError(htmlError, response: htmlResponse, fallback: "HTML HTTP \(htmlStatus)")
+                        finish(.failure(fail("API \(apiStatus); redirect \(redirectDetail); atom \(atomDetail); releases \(detail)", code: apiStatus)))
+                    }.resume()
                 }.resume()
             }.resume()
         }.resume()
+    }
+
+    private func describeURLSessionError(_ error: Error?, response: URLResponse?, fallback: String) -> String {
+        if let error {
+            let ns = error as NSError
+            if ns.domain == NSURLErrorDomain {
+                return "\(error.localizedDescription) (\(ns.code))"
+            }
+            return error.localizedDescription
+        }
+        if let http = response as? HTTPURLResponse {
+            return "HTTP \(http.statusCode)"
+        }
+        return fallback
+    }
+
+    private func versionFromReleasesHTML(_ data: Data?) -> String? {
+        guard let data, let html = String(data: data, encoding: .utf8) else { return nil }
+        let pattern = #"releases/tag/v([0-9]+(?:\.[0-9]+)*)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        guard let match = regex.firstMatch(in: html, range: range),
+              let versionRange = Range(match.range(at: 1), in: html) else {
+            return nil
+        }
+        let version = String(html[versionRange])
+        return version.isEmpty ? nil : version
     }
 
     private func decodeGitHubAPIRelease(data: Data?, response: URLResponse?) -> LatestReleaseInfo? {
@@ -10325,9 +10407,13 @@ private final class UpdateDownloadController: NSObject, URLSessionDownloadDelega
     private var delivered = false
 
     func start(url: URL) {
-        let config = URLSessionConfiguration.ephemeral
+        let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 600
+        config.waitsForConnectivity = true
+        config.httpAdditionalHeaders = [
+            "User-Agent": "FinderPathBar/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0") (macOS)"
+        ]
         let session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
         self.session = session
         session.downloadTask(with: url).resume()
