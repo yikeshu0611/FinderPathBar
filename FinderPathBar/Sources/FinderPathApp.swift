@@ -170,6 +170,8 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     /// When true, the path bar is attached to another app's Open/Save file dialog.
     private var isFileDialogMode = false
     private var attachedFileDialogPID: pid_t?
+    /// Preserved across save-as panel navigation so bookmarks don't overwrite the filename.
+    private var savedSaveAsFilename: String?
     private var lastFileDialogBounds: NSRect?
     private var lastFileDialogPathSyncAt = Date.distantPast
     private var isNavigatingFileDialog = false
@@ -6834,6 +6836,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         lastFileDialogBounds = nil
         isNavigatingFileDialog = false
         fileDialogNavigationToken += 1
+        savedSaveAsFilename = nil
     }
 
     /// Drop Open/Save attachment and allow immediate Finder reattach.
@@ -7055,24 +7058,31 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private func currentFileDialogPath(from dialog: FileDialogInfo) -> String? {
-        if let document = axStringAttribute(dialog.window, kAXDocumentAttribute as String)
-            ?? axStringAttribute(dialog.window, kAXURLAttribute as String) {
-            let path = normalizePath(document.replacingOccurrences(of: "file://", with: ""))
-            if path.hasPrefix("/") {
-                var isDirectory: ObjCBool = false
-                if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) {
-                    if isDirectory.boolValue {
-                        return path
+        let saveAsPanel = hasSaveAsField(in: dialog.window)
+
+        if !saveAsPanel {
+            if let document = axStringAttribute(dialog.window, kAXDocumentAttribute as String)
+                    ?? axStringAttribute(dialog.window, kAXURLAttribute as String) {
+                let path = normalizePath(document.replacingOccurrences(of: "file://", with: ""))
+                if path.hasPrefix("/") {
+                    var isDirectory: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) {
+                        if isDirectory.boolValue {
+                            return path
+                        }
+                        return normalizePath(URL(fileURLWithPath: path).deletingLastPathComponent().path)
                     }
-                    return normalizePath(URL(fileURLWithPath: path).deletingLastPathComponent().path)
-                }
-                // Save-as / create: target file may not exist yet — use parent folder.
-                let parent = normalizePath(URL(fileURLWithPath: path).deletingLastPathComponent().path)
-                var parentIsDir: ObjCBool = false
-                if FileManager.default.fileExists(atPath: parent, isDirectory: &parentIsDir), parentIsDir.boolValue {
-                    return parent
+                    let parent = normalizePath(URL(fileURLWithPath: path).deletingLastPathComponent().path)
+                    var parentIsDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: parent, isDirectory: &parentIsDir), parentIsDir.boolValue {
+                        return parent
+                    }
                 }
             }
+        }
+
+        if let path = pathFromFileDialogBrowser(in: dialog.window) {
+            return path
         }
         if let path = pathFromAXPathControl(in: dialog.window) {
             return path
@@ -7080,15 +7090,149 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         if let path = pathFromFileDialogKnownLocation(in: dialog.window) {
             return path
         }
-        if let path = pathLikeString(in: dialog.window) {
+        if !saveAsPanel, let path = pathLikeString(in: dialog.window) {
             return path
         }
-        // Fall back: keep showing whatever we already have if still valid.
         let current = normalizePath(pathField.stringValue)
         if !current.isEmpty, FileManager.default.fileExists(atPath: current) {
             return current
         }
         return nil
+    }
+
+    /// Build directory path from sidebar + column/list selection (save-as / create panels).
+    private func pathFromFileDialogBrowser(in root: AXUIElement) -> String? {
+        var basePath = pathFromFileDialogKnownLocation(in: root)
+        var browserRoots: [(AXUIElement, CGFloat)] = []
+        walkAX(root, maxNodes: 200) { element in
+            let role = axRole(element)
+            if role == "AXOutline" || role == "AXBrowser" || role == "AXTable" {
+                if let frame = axWindowRect(element), frame.width >= 120 {
+                    browserRoots.append((element, frame.minX))
+                }
+            }
+            return true
+        }
+        guard !browserRoots.isEmpty else { return basePath }
+
+        var path = basePath
+        for (browser, _) in browserRoots.sorted(by: { $0.1 < $1.1 }) {
+            var selectedTitle: String?
+            walkAX(browser, maxNodes: 120) { element in
+                guard axRole(element) == "AXRow" else { return true }
+                var selectedValue: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, kAXSelectedAttribute as CFString, &selectedValue) == .success,
+                      (selectedValue as? Bool) == true,
+                      let title = fileDialogElementTitle(element) else {
+                    return true
+                }
+                selectedTitle = title
+                return true
+            }
+            guard let title = selectedTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty else { continue }
+            if let current = path {
+                let last = URL(fileURLWithPath: current).lastPathComponent
+                if last.caseInsensitiveCompare(title) == .orderedSame { continue }
+                if let resolved = resolveChildFolder(named: title, in: current) {
+                    path = resolved
+                }
+            } else if let resolved = resolveKnownFolderDisplayName(title) {
+                path = resolved
+            }
+        }
+        return path.map(normalizePath)
+    }
+
+    private func resolveChildFolder(named name: String, in parentPath: String) -> String? {
+        let parent = normalizePath(parentPath)
+        let direct = normalizePath((parent as NSString).appendingPathComponent(name))
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: direct, isDirectory: &isDir), isDir.boolValue {
+            return direct
+        }
+        guard let items = try? FileManager.default.contentsOfDirectory(atPath: parent) else { return nil }
+        for item in items {
+            let full = normalizePath((parent as NSString).appendingPathComponent(item))
+            guard FileManager.default.fileExists(atPath: full, isDirectory: &isDir), isDir.boolValue else { continue }
+            if item.caseInsensitiveCompare(name) == .orderedSame { return full }
+            if FileManager.default.displayName(atPath: full).caseInsensitiveCompare(name) == .orderedSame {
+                return full
+            }
+        }
+        return nil
+    }
+
+    private func findSaveAsFilenameField(in root: AXUIElement) -> AXUIElement? {
+        var found: AXUIElement?
+        walkAX(root, maxNodes: 140) { element in
+            let role = axRole(element)
+            guard role == "AXTextField" || role == "AXComboBox" else { return true }
+            if isSaveAsFilenameField(element, in: root) {
+                found = element
+                return false
+            }
+            return true
+        }
+        return found
+    }
+
+    private func isSaveAsFilenameField(_ field: AXUIElement, in root: AXUIElement) -> Bool {
+        var current: AXUIElement? = field
+        for _ in 0..<8 {
+            guard let node = current else { break }
+            var parentValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(node, kAXParentAttribute as CFString, &parentValue) == .success,
+                  let parent = AXSafe.element(parentValue) else { break }
+            var nearLabel = false
+            walkAX(parent, maxNodes: 24) { sibling in
+                guard axRole(sibling) == "AXStaticText" else { return true }
+                let label = (axTitle(sibling) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if label == "save as:" || label == "save as" || label == "存储为:" || label == "存储为" {
+                    nearLabel = true
+                    return false
+                }
+                return true
+            }
+            if nearLabel { return true }
+            current = parent
+        }
+        if let fieldRect = axElementScreenRect(field),
+           let rootRect = axWindowRect(root),
+           fieldRect.minY > rootRect.maxY - rootRect.height * 0.38 {
+            return true
+        }
+        return false
+    }
+
+    private func readSaveAsFilename(from root: AXUIElement) -> String? {
+        guard let field = findSaveAsFilenameField(in: root) else { return nil }
+        return axStringAttribute(field, kAXValueAttribute as String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func restoreSaveAsFilenameIfNeeded() {
+        guard let saved = savedSaveAsFilename, !saved.isEmpty,
+              let dialog = findFrontFileDialog()
+                ?? (attachedFileDialogPID.flatMap { NSRunningApplication(processIdentifier: $0) }.flatMap { fileDialog(in: $0) }),
+              let field = findSaveAsFilenameField(in: dialog.window) else {
+            savedSaveAsFilename = nil
+            return
+        }
+        let current = axStringAttribute(field, kAXValueAttribute as String) ?? ""
+        if current != saved {
+            AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            _ = AXUIElementSetAttributeValue(field, kAXValueAttribute as CFString, saved as CFTypeRef)
+        }
+        savedSaveAsFilename = nil
+    }
+
+    private func snapshotSaveAsFilenameIfNeeded(in dialog: FileDialogInfo) {
+        guard hasSaveAsField(in: dialog.window) else {
+            savedSaveAsFilename = nil
+            return
+        }
+        savedSaveAsFilename = readSaveAsFilename(from: dialog.window)
     }
 
     /// Sidebar / path header often shows localized names like “文稿” instead of a POSIX path.
@@ -7189,6 +7333,9 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     private func pathLikeString(in root: AXUIElement) -> String? {
         var best: String?
         walkAX(root, maxNodes: 100) { element in
+            if isSaveAsFilenameField(element, in: root) {
+                return true
+            }
             guard let value = axStringAttribute(element, kAXValueAttribute as String)
                     ?? axTitle(element) else {
                 return true
@@ -7273,6 +7420,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             clearFileDialogMode()
             return
         }
+        snapshotSaveAsFilenameIfNeeded(in: dialog)
 
         var fromPath = normalizePath(pathField.stringValue)
         if let live = currentFileDialogPath(from: dialog), !live.isEmpty {
@@ -7480,14 +7628,36 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
                             expectedPath: expected
                         )
                     } else {
-                        AppLogger.shared.log("relative verify failed live=\(again ?? "nil") expected=\(expected); GoToFolder")
-                        self.navigateFileDialogViaGoToFolder(targetPath: targetPath, dialog: liveDialog)
+                        AppLogger.shared.log("relative verify failed live=\(again ?? "nil") expected=\(expected); retry step")
+                        if hasSaveAsField(in: liveDialog.window) {
+                            self.runFileDialogRelativeStep(
+                                plan: plan,
+                                targetPath: targetPath,
+                                dialog: liveDialog,
+                                token: token,
+                                stepIndex: stepIndex,
+                                expectedPath: expected
+                            )
+                        } else {
+                            self.navigateFileDialogViaGoToFolder(targetPath: targetPath, dialog: liveDialog)
+                        }
                     }
                 }
                 return
             }
-            AppLogger.shared.log("relative verify failed live=\(live) expected=\(expected); GoToFolder")
-            navigateFileDialogViaGoToFolder(targetPath: targetPath, dialog: liveDialog)
+            AppLogger.shared.log("relative verify failed live=\(live) expected=\(expected)")
+            if hasSaveAsField(in: liveDialog.window) {
+                runFileDialogRelativeStep(
+                    plan: plan,
+                    targetPath: targetPath,
+                    dialog: liveDialog,
+                    token: token,
+                    stepIndex: stepIndex,
+                    expectedPath: expected
+                )
+            } else {
+                navigateFileDialogViaGoToFolder(targetPath: targetPath, dialog: liveDialog)
+            }
             return
         }
         runFileDialogRelativeStep(
@@ -7691,15 +7861,28 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
 
     private func finishFileDialogNavigation(to targetPath: String) {
         isNavigatingFileDialog = false
-        recordHistory(targetPath)
-        applyPathToUI(targetPath)
+        let resolvedPath: String
+        if let refreshed = findFrontFileDialog(),
+           let live = currentFileDialogPath(from: refreshed), !live.isEmpty {
+            resolvedPath = live
+        } else {
+            resolvedPath = targetPath
+        }
+        recordHistory(resolvedPath)
+        applyPathToUI(resolvedPath)
+        restoreSaveAsFilenameIfNeeded()
         if let refreshed = findFrontFileDialog() {
             syncWithFileDialog(refreshed)
         }
     }
 
-    /// Fallback only: ⌘⇧G once. Move the sheet off-screen; confirm with the Go button (not bare Return/Open).
+    /// Fallback only: ⌘⇧G once. Never on save-as/create panels (would overwrite the filename field).
     private func navigateFileDialogViaGoToFolder(targetPath: String, dialog: FileDialogInfo) {
+        if hasSaveAsField(in: dialog.window) {
+            AppLogger.shared.log("navigateFileDialogViaGoToFolder skipped on save-as panel")
+            finishFileDialogNavigation(to: targetPath)
+            return
+        }
         AppLogger.shared.log("navigateFileDialogViaGoToFolder path=\(targetPath)")
         fileDialogNavigationToken += 1
         let token = fileDialogNavigationToken
@@ -7787,7 +7970,9 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedUI) == .success,
            let focused = AXSafe.element(focusedUI),
            axRole(focused) == "AXTextField" || axRole(focused) == "AXComboBox" {
-            if let sheet = axEnclosingSheetOrWindow(focused), isLikelyGoToFolderSheet(sheet) {
+            let saveAsField = fileDialog(in: app).map { isSaveAsFilenameField(focused, in: $0.window) } ?? false
+            if !saveAsField,
+               let sheet = axEnclosingSheetOrWindow(focused), isLikelyGoToFolderSheet(sheet) {
                 return (sheet, focused)
             }
         }
@@ -7809,10 +7994,14 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         }
 
         for candidate in candidates where isLikelyGoToFolderSheet(candidate) {
+            let dialogRoot = fileDialog(in: app)?.window
             var field: AXUIElement?
             walkAX(candidate, maxNodes: 40) { element in
                 let role = axRole(element)
                 if role == "AXTextField" || role == "AXComboBox" {
+                    if let dialogRoot, isSaveAsFilenameField(element, in: dialogRoot) {
+                        return true
+                    }
                     field = element
                     return false
                 }
@@ -7826,6 +8015,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private func isLikelyGoToFolderSheet(_ element: AXUIElement) -> Bool {
+        if hasSaveAsField(in: element) { return false }
         let role = axRole(element)
         let subrole = axSubrole(element)
         let isSheetLike = role == "AXSheet" || subrole == "AXDialog" || subrole == "AXSystemDialog"
@@ -7836,6 +8026,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
 
         let titles = collectButtonTitles(in: element, limit: 20)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        if titles.contains(where: { $0 == "create" || $0 == "创建" }) { return false }
         if titles.contains(where: { $0 == "go" || $0 == "前往" }) {
             return true
         }
@@ -7898,8 +8089,10 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             walkAX(dialog.window, maxNodes: 80) { element in
                 let role = axRole(element)
                 if role == "AXTextField" || role == "AXComboBox" {
-                    field = element
-                    return false
+                    if !isSaveAsFilenameField(element, in: dialog.window) {
+                        field = element
+                        return false
+                    }
                 }
                 return true
             }
