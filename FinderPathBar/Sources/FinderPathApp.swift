@@ -6906,8 +6906,9 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         let normalized = titles.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
         let hasCancel = normalized.contains { $0 == "cancel" || $0 == "取消" }
         let hasConfirm = normalized.contains {
-            $0 == "open" || $0 == "打开" || $0 == "save" || $0 == "存储" || $0 == "储存"
+            $0 == "open" || $0 == "打开" || $0 == "save" || $0 == "存储" || $0 == "储存" || $0 == "保存"
                 || $0 == "choose" || $0 == "选择" || $0 == "select" || $0 == "上传"
+                || $0 == "create" || $0 == "创建" || $0 == "new" || $0 == "新建"
                 || $0.hasPrefix("open ") || $0.hasPrefix("打开")
         }
         guard hasCancel && hasConfirm else { return false }
@@ -6915,9 +6916,33 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         if containsFileBrowserChrome(element) {
             return true
         }
-        // Some sandboxed panels expose fewer roles; Cancel+Open is enough.
+        // Save-as / create-project panels (e.g. RStudio “新建 R 项目”) may expose fewer roles.
+        if hasSaveAsField(in: element) {
+            return true
+        }
+        // Some sandboxed panels expose fewer roles; Cancel+confirm is enough.
         let role = axRole(element)
         return role == "AXSheet" || role == "AXWindow" || axSubrole(element) == "AXDialog"
+    }
+
+    /// NSSavePanel-style “Save As / 存储为” field — common on create-project dialogs.
+    private func hasSaveAsField(in root: AXUIElement) -> Bool {
+        var found = false
+        walkAX(root, maxNodes: 100) { element in
+            let role = axRole(element)
+            guard role == "AXStaticText" || role == "AXTextField" || role == "AXComboBox" else {
+                return true
+            }
+            let label = (axTitle(element) ?? axStringAttribute(element, kAXValueAttribute as String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if label == "save as:" || label == "save as" || label == "存储为:" || label == "存储为" {
+                found = true
+                return false
+            }
+            return true
+        }
+        return found
     }
 
     private func containsFileBrowserChrome(_ element: AXUIElement) -> Bool {
@@ -6951,11 +6976,26 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         if let document = axStringAttribute(dialog.window, kAXDocumentAttribute as String)
             ?? axStringAttribute(dialog.window, kAXURLAttribute as String) {
             let path = normalizePath(document.replacingOccurrences(of: "file://", with: ""))
-            if path.hasPrefix("/"), FileManager.default.fileExists(atPath: path) {
-                return path
+            if path.hasPrefix("/") {
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) {
+                    if isDirectory.boolValue {
+                        return path
+                    }
+                    return normalizePath(URL(fileURLWithPath: path).deletingLastPathComponent().path)
+                }
+                // Save-as / create: target file may not exist yet — use parent folder.
+                let parent = normalizePath(URL(fileURLWithPath: path).deletingLastPathComponent().path)
+                var parentIsDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: parent, isDirectory: &parentIsDir), parentIsDir.boolValue {
+                    return parent
+                }
             }
         }
         if let path = pathFromAXPathControl(in: dialog.window) {
+            return path
+        }
+        if let path = pathFromFileDialogKnownLocation(in: dialog.window) {
             return path
         }
         if let path = pathLikeString(in: dialog.window) {
@@ -6965,6 +7005,63 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         let current = normalizePath(pathField.stringValue)
         if !current.isEmpty, FileManager.default.fileExists(atPath: current) {
             return current
+        }
+        return nil
+    }
+
+    /// Sidebar / path header often shows localized names like “文稿” instead of a POSIX path.
+    private func pathFromFileDialogKnownLocation(in root: AXUIElement) -> String? {
+        var selectedSidebarTitle: String?
+        walkAX(root, maxNodes: 180) { element in
+            if axRole(element) == "AXRow" {
+                var selectedValue: CFTypeRef?
+                if AXUIElementCopyAttributeValue(element, kAXSelectedAttribute as CFString, &selectedValue) == .success,
+                   (selectedValue as? Bool) == true,
+                   let title = fileDialogElementTitle(element) {
+                    selectedSidebarTitle = title
+                    return false
+                }
+            }
+            return true
+        }
+        if let title = selectedSidebarTitle, let path = resolveKnownFolderDisplayName(title) {
+            return path
+        }
+
+        var headerPath: String?
+        walkAX(root, maxNodes: 120) { element in
+            let role = axRole(element)
+            guard role == "AXButton" || role == "AXPopUpButton" || role == "AXMenuButton" else {
+                return true
+            }
+            if let title = axTitle(element) ?? axStringAttribute(element, kAXValueAttribute as String),
+               let path = resolveKnownFolderDisplayName(title) {
+                headerPath = path
+                return false
+            }
+            return true
+        }
+        return headerPath
+    }
+
+    private func resolveKnownFolderDisplayName(_ name: String) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let entries: [(FileManager.SearchPathDirectory, [String])] = [
+            (.desktopDirectory, ["Desktop", "桌面"]),
+            (.documentDirectory, ["Documents", "文稿", "文档"]),
+            (.downloadsDirectory, ["Downloads", "下载"]),
+            (.moviesDirectory, ["Movies", "影片", "电影"]),
+            (.musicDirectory, ["Music", "音乐"]),
+            (.picturesDirectory, ["Pictures", "图片"]),
+            (.applicationDirectory, ["Applications", "应用程序"]),
+            (.userDirectory, ["Users", "用户"])
+        ]
+        for (directory, labels) in entries {
+            if labels.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }),
+               let url = FileManager.default.urls(for: directory, in: .userDomainMask).first {
+                return normalizePath(url.path)
+            }
         }
         return nil
     }
