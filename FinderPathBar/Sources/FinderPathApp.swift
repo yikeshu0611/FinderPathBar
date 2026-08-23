@@ -2989,7 +2989,7 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     @objc private func closeFinderAndHide() {
-        AppLogger.shared.log("closeFinderAndHide start attachedID=\(attachedFinderWindowID.map(String.init) ?? "nil")")
+        AppLogger.shared.log("closeFinderAndHide start fileDialog=\(isFileDialogMode) attachedID=\(attachedFinderWindowID.map(String.init) ?? "nil")")
         suppressAutoAttachUntil = Date().addingTimeInterval(0.04)
         if !ensureAccessibilityPermission(prompt: true) {
             AppLogger.shared.log("closeFinderAndHide blocked: accessibility permission missing")
@@ -2998,7 +2998,9 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
             suppressAutoAttachUntil = nil
             return
         }
-        let closeResult = closeAttachedFinderWindowWithAccessibility()
+        let closeResult = isFileDialogMode
+            ? closeAttachedFileDialogWithAccessibility()
+            : closeAttachedFinderWindowWithAccessibility()
         if !closeResult.didClose {
             AppLogger.shared.log("closeFinderAndHide failed message=\(closeResult.message)")
             NSSound.beep()
@@ -7832,6 +7834,45 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         return pressCloseButton(in: firstWindow)
             ? CloseResult(true, "")
             : CloseResult(false, "无法按下 Finder 关闭按钮")
+    }
+
+    private func closeAttachedFileDialogWithAccessibility() -> CloseResult {
+        guard ensureAccessibilityPermission(prompt: false) else {
+            return CloseResult(false, localized("Accessibility permission is not enabled", "辅助功能权限未生效"))
+        }
+        guard let dialog = findFrontFileDialog()
+                ?? (attachedFileDialogPID.flatMap { NSRunningApplication(processIdentifier: $0) }.flatMap { fileDialog(in: $0) }) else {
+            return CloseResult(false, localized("No file dialog", "未找到打开/保存对话框"))
+        }
+
+        AppLogger.shared.log("closeAttachedFileDialog app=\(dialog.app.bundleIdentifier ?? "?")")
+        dialog.app.activate(options: [.activateIgnoringOtherApps])
+        AXUIElementPerformAction(dialog.window, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(dialog.window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+
+        let closed = pressCloseButton(in: dialog.window)
+            || pressFileDialogCancelButton(in: dialog.window)
+        if !closed {
+            postKeyCombo(keyCode: CGKeyCode(kVK_Escape), flags: [])
+        }
+        clearFileDialogMode()
+        return CloseResult(true, "")
+    }
+
+    @discardableResult
+    private func pressFileDialogCancelButton(in root: AXUIElement) -> Bool {
+        var cancelButton: AXUIElement?
+        walkAX(root, maxNodes: 80) { element in
+            guard axRole(element) == "AXButton" else { return true }
+            let title = (axTitle(element) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if title == "cancel" || title == "取消" {
+                cancelButton = element
+                return false
+            }
+            return true
+        }
+        guard let cancelButton else { return false }
+        return AXUIElementPerformAction(cancelButton, kAXPressAction as CFString) == .success
     }
 
     private func attachedFinderWindowElement(for finder: NSRunningApplication) -> AXUIElement? {
