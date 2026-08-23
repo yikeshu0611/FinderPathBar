@@ -7850,8 +7850,9 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         AXUIElementPerformAction(dialog.window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(dialog.window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 
-        let closed = pressCloseButton(in: dialog.window)
-            || pressFileDialogCancelButton(in: dialog.window)
+        // Open/Save panels: map × to Cancel only — never title-bar close or the first
+        // AXButton (often “Show Options” / “Hide Options” at bottom-left).
+        let closed = pressFileDialogCancelButton(in: dialog.window)
         if !closed {
             postKeyCombo(keyCode: CGKeyCode(kVK_Escape), flags: [])
         }
@@ -7861,18 +7862,33 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
 
     @discardableResult
     private func pressFileDialogCancelButton(in root: AXUIElement) -> Bool {
-        var cancelButton: AXUIElement?
-        walkAX(root, maxNodes: 80) { element in
+        struct Candidate {
+            let element: AXUIElement
+            let frame: CGRect?
+        }
+        var candidates: [Candidate] = []
+        walkAX(root, maxNodes: 150) { element in
             guard axRole(element) == "AXButton" else { return true }
-            let title = (axTitle(element) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if title == "cancel" || title == "取消" {
-                cancelButton = element
-                return false
-            }
+            let title = (axTitle(element) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isFileDialogCancelButtonTitle(title) else { return true }
+            candidates.append(Candidate(element: element, frame: axElementScreenRect(element)))
             return true
         }
-        guard let cancelButton else { return false }
-        return AXUIElementPerformAction(cancelButton, kAXPressAction as CFString) == .success
+        guard !candidates.isEmpty else { return false }
+        let picked = candidates.max { a, b in
+            let scoreA = (a.frame?.maxX ?? 0) - (a.frame?.minY ?? 0)
+            let scoreB = (b.frame?.maxX ?? 0) - (b.frame?.minY ?? 0)
+            return scoreA < scoreB
+        }
+        guard let picked else { return false }
+        return AXUIElementPerformAction(picked.element, kAXPressAction as CFString) == .success
+    }
+
+    private func isFileDialogCancelButtonTitle(_ title: String) -> Bool {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        if lower == "cancel" || trimmed == "取消" { return true }
+        return false
     }
 
     private func attachedFinderWindowElement(for finder: NSRunningApplication) -> AXUIElement? {
