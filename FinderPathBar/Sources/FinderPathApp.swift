@@ -4809,6 +4809,11 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
     }
 
     private func isFinderUtilityDialogWindow(_ window: AXUIElement) -> Bool {
+        // Spacebar Quick Look / 快速查看 — do not attach FP to the preview window.
+        if isFinderQuickLookPreviewWindow(window) {
+            return true
+        }
+
         let title = (axTitle(window) ?? "").lowercased()
         if title.contains("简介") || title.contains("get info") || title.hasSuffix(" info") {
             return true
@@ -4826,6 +4831,54 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         return false
     }
 
+    /// Finder-hosted Quick Look (Space): title is often the file name; chrome has "Open with…".
+    private func isFinderQuickLookPreviewWindow(_ window: AXUIElement) -> Bool {
+        let buttonTitles = collectButtonTitles(in: window, limit: 40)
+        if buttonTitles.contains(where: isQuickLookOpenWithButtonTitle) {
+            return true
+        }
+
+        let subrole = axSubrole(window)
+        let floating = subrole == "AXFloatingWindow"
+            || subrole == "AXSystemFloatingWindow"
+            || subrole == "AXDialog"
+            || subrole == "AXSystemDialog"
+        if floating, titleLooksLikePreviewedDocument(axTitle(window) ?? "") {
+            return true
+        }
+        return false
+    }
+
+    private func isQuickLookOpenWithButtonTitle(_ title: String) -> Bool {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("open with ") { return true }
+        // e.g. 「通过 WPS Office 打开」「通过“预览”打开」
+        if trimmed.hasPrefix("通过"), trimmed.hasSuffix("打开"), trimmed.count > 4 {
+            return true
+        }
+        // e.g. 「用预览打开」
+        if trimmed.hasPrefix("用"), trimmed.hasSuffix("打开"), trimmed.count > 3, !trimmed.hasPrefix("用于") {
+            return true
+        }
+        return false
+    }
+
+    private func titleLooksLikePreviewedDocument(_ title: String) -> Bool {
+        let name = (title as NSString).lastPathComponent
+        let ext = (name as NSString).pathExtension.lowercased()
+        guard !ext.isEmpty else { return false }
+        let previewExts: Set<String> = [
+            "pdf", "png", "jpg", "jpeg", "gif", "webp", "heic", "tif", "tiff", "bmp", "svg",
+            "mov", "mp4", "m4v", "avi", "mkv", "mp3", "m4a", "wav", "aac",
+            "txt", "md", "rtf", "csv", "html", "htm",
+            "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+            "pages", "numbers", "key",
+        ]
+        return previewExts.contains(ext)
+    }
+
     private func isFinderShowingFloatingWindow() -> Bool {
         shouldHidePathBarForFinderDialog()
     }
@@ -4838,12 +4891,23 @@ final class FinderPathApp: NSObject, NSApplicationDelegate, NSTextFieldDelegate,
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier
     }
 
+    private var isDocumentPreviewAppFrontmost: Bool {
+        let id = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        return id == "com.apple.Preview"
+            || id == "com.apple.quicklook.ui.helper"
+            || id == "com.apple.QuickLookUIFramework.QLPreviewGenerationExtension"
+    }
+
     private var shouldUseFinderWindowContext: Bool {
         // Clicking the path bar / bookmarks activates FinderPathBar. Keep the
         // bar up in that case — requiring an attached window ID made it hide
         // as soon as Finder finished (or briefly lost) focus.
         if isFileDialogMode {
             return true
+        }
+        // Preview.app / Quick Look helper: never keep FP up over document previews.
+        if isDocumentPreviewAppFrontmost {
+            return false
         }
         if isFinderFrontmost || isFinderPathBarFrontmost {
             return true
