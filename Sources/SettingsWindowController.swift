@@ -9,10 +9,15 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private var typeRowsStack: NSStackView!
     private var redirectFinderCheckbox: NSButton!
     private var launchAtLoginCheckbox: NSButton!
+    private var versionLabel: NSTextField!
+    private var updateStatusLabel: NSTextField!
+    private var checkUpdateButton: NSButton!
+    private var downloadUpdateButton: NSButton!
+    private var pendingRelease: UpdateChecker.ReleaseInfo?
 
     private init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 500),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -75,6 +80,33 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         redirectHint.preferredMaxLayoutWidth = 440
         stack.addArrangedSubview(redirectHint)
 
+        let updateTitle = NSTextField(labelWithString: "更新")
+        updateTitle.font = .boldSystemFont(ofSize: 13)
+        stack.addArrangedSubview(updateTitle)
+
+        versionLabel = NSTextField(labelWithString: "当前版本：—")
+        versionLabel.font = .systemFont(ofSize: 12)
+        stack.addArrangedSubview(versionLabel)
+
+        updateStatusLabel = NSTextField(wrappingLabelWithString: "从 GitHub 检查 NewFinder 新版本。")
+        updateStatusLabel.textColor = .secondaryLabelColor
+        updateStatusLabel.font = .systemFont(ofSize: 11)
+        updateStatusLabel.preferredMaxLayoutWidth = 440
+        stack.addArrangedSubview(updateStatusLabel)
+
+        let updateRow = NSStackView()
+        updateRow.orientation = .horizontal
+        updateRow.spacing = 8
+        updateRow.alignment = .centerY
+        checkUpdateButton = NSButton(title: "检查更新", target: self, action: #selector(checkForUpdates))
+        checkUpdateButton.bezelStyle = .rounded
+        downloadUpdateButton = NSButton(title: "下载更新", target: self, action: #selector(downloadUpdate))
+        downloadUpdateButton.bezelStyle = .rounded
+        downloadUpdateButton.isHidden = true
+        updateRow.addArrangedSubview(checkUpdateButton)
+        updateRow.addArrangedSubview(downloadUpdateButton)
+        stack.addArrangedSubview(updateRow)
+
         let newTitle = NSTextField(labelWithString: "快捷新建类型（dir = 文件夹；大小写按原样保留）")
         newTitle.font = .boldSystemFont(ofSize: 13)
         stack.addArrangedSubview(newTitle)
@@ -117,7 +149,61 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private func reloadValues() {
         redirectFinderCheckbox.state = settings.redirectFinderClicks ? .on : .off
         launchAtLoginCheckbox.state = settings.launchAtLogin ? .on : .off
+        versionLabel.stringValue = "当前版本：\(UpdateChecker.currentVersion)"
         rebuildTypeRows(with: settings.newItemTypes)
+    }
+
+    @objc private func checkForUpdates() {
+        checkUpdateButton.isEnabled = false
+        downloadUpdateButton.isHidden = true
+        pendingRelease = nil
+        updateStatusLabel.stringValue = "正在检查更新…"
+
+        UpdateChecker.fetchLatest { [weak self] result in
+            guard let self else { return }
+            self.checkUpdateButton.isEnabled = true
+            switch result {
+            case .failure:
+                self.updateStatusLabel.stringValue = "检查失败，请确认网络连接后重试。"
+            case .success(let release):
+                let current = UpdateChecker.currentVersion
+                if UpdateChecker.isVersion(release.version, newerThan: current) {
+                    self.pendingRelease = release
+                    self.updateStatusLabel.stringValue = "发现新版本 \(release.version)（当前 \(current)）。"
+                    self.downloadUpdateButton.isHidden = false
+                } else {
+                    self.updateStatusLabel.stringValue = "已是最新版本（\(current)）。"
+                }
+            }
+        }
+    }
+
+    @objc private func downloadUpdate() {
+        guard let release = pendingRelease else { return }
+        checkUpdateButton.isEnabled = false
+        downloadUpdateButton.isEnabled = false
+        updateStatusLabel.stringValue = "正在下载 \(release.version)…"
+
+        UpdateChecker.download(release) { [weak self] result in
+            guard let self else { return }
+            self.checkUpdateButton.isEnabled = true
+            self.downloadUpdateButton.isEnabled = true
+            switch result {
+            case .failure:
+                self.updateStatusLabel.stringValue = "下载失败，请稍后重试或在 GitHub Releases 手动下载。"
+            case .success(let dmgURL):
+                NSWorkspace.shared.open(dmgURL)
+                self.updateStatusLabel.stringValue = "已下载并打开安装包，请将 NewFinder 拖入「应用程序」完成更新。"
+                let alert = NSAlert()
+                alert.messageText = "更新包已下载"
+                alert.informativeText = """
+                已打开 \(dmgURL.lastPathComponent)。
+                将 NewFinder 拖入「应用程序」文件夹覆盖旧版本，然后重新打开即可。
+                """
+                alert.addButton(withTitle: "好")
+                alert.runModal()
+            }
+        }
     }
 
     private func rebuildTypeRows(with types: [String]) {

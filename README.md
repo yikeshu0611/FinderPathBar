@@ -8,7 +8,7 @@
 
 在 [Releases](https://github.com/yikeshu0611/FinderPathBar/releases) 页面下载最新 `NewFinder-x.x.x.dmg`，拖入「应用程序」即可。
 
-**当前版本：1.1.0**
+**当前版本：1.1.1**
 
 ## 主要功能
 
@@ -39,6 +39,7 @@
 ### 设置
 - 登录时启动、是否拦截 Finder
 - **自定义新建类型**（可添加多项，最多 40 个；`dir` 表示文件夹）
+- **检查更新**：从 GitHub Releases 检测并下载最新 DMG
 - 书签与收藏夹顺序持久化
 
 ## 构建
@@ -48,7 +49,7 @@ cd NewFinder && ./build.sh
 open build/NewFinder.app
 ```
 
-产物：`dist/NewFinder-1.1.0.dmg`
+产物：`dist/NewFinder-1.1.1.dmg`
 
 ## 快捷键
 

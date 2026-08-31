@@ -42,6 +42,7 @@ SOURCES=(
   "$ROOT_DIR/Sources/ChromeHeaderView.swift"
   "$ROOT_DIR/Sources/ContentViewController.swift"
   "$ROOT_DIR/Sources/SettingsWindowController.swift"
+  "$ROOT_DIR/Sources/UpdateChecker.swift"
   "$ROOT_DIR/Sources/BookmarksUI.swift"
 )
 
