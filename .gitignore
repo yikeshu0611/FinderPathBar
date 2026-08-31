@@ -1,0 +1,18 @@
+# Build artifacts
+build/
+dist/
+
+# macOS
+.DS_Store
+
+# Secrets & local notes (never commit)
+github账号信息.txt
+*.env
+.env*
+
+# Scratch / test files
+未命名.xlsx
+未命名.*
+
+# Editor
+.cursor/
